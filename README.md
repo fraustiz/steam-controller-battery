@@ -31,7 +31,7 @@ ordonnancé du tout.
 |---|---|---|
 | Rien de branché | Rien. Le fil de lecture s'est terminé. | Zéro réveil |
 | Dongle branché, manette éteinte | Une tentative toutes les 5 s | négligeable |
-| Manette connectée | Un fil à l'écoute du flux | voir ci-dessous |
+| Manette connectée | Un fil à l'écoute du flux | 0,31 % d'un cœur |
 
 La mémoire privée tient en 2,2 Mo ; les 12 Mo affichés par le gestionnaire des
 tâches comptent les DLL système partagées avec le reste de la machine.
@@ -57,8 +57,15 @@ charge apparaît en quelques secondes, et plus aucun minuteur ne tourne.
 
 Le prix en est de traverser le flux d'entrée à 270 Hz, qui arrive sur la même
 interface. Traverser ne veut pas dire traiter : chaque rapport coûte une
-comparaison d'octet, et le noyau reçoit ces rapports de toute façon, que nous
-les lisions ou non.
+comparaison d'octet, et le noyau les reçoit de toute façon, que nous les
+lisions ou non.
+
+Ce prix se mesure : **0,31 % d'un cœur**, contre 0,035 % pour le sondage
+périodique. Neuf fois plus, donc, pour passer d'une demi-minute à quelques
+secondes de latence. En valeur absolue cela reste 0,3 % d'un seul cœur, et
+uniquement tant qu'une manette est connectée — mais c'est un arbitrage, pas un
+repas gratuit. Qui préférerait l'inverse n'a qu'à remplacer l'écoute par un
+appel périodique à `probe()` : `run_reader` est la seule fonction concernée.
 
 L'infobulle suit chaque relevé, mais l'icône n'est reconstruite que lorsque son
 dessin change réellement — sans quoi on fabriquerait une icône toutes les trois
