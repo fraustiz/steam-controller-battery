@@ -1,20 +1,25 @@
 # Batterie de la Steam Controller 2026
 
 Le niveau de batterie de la manette, en permanence, dans la zone de
-notification de Windows. Un binaire de 164 Ko, sans runtime, sans installateur,
+notification de Windows. Un binaire de 187 Ko, sans runtime, sans installateur,
 et qui ne consomme rien quand la manette n'est pas là.
 
 ## Utilisation
 
-Lancer `sc-battery.exe`. Une pastille colorée portant le pourcentage apparaît
-dans la zone de notification.
+Lancer `sc-battery.exe`. Une batterie verticale apparaît dans la zone de
+notification : le remplissage suit le niveau, du vert au rouge en passant par
+l'ambre. Le contour prend le ton qui contraste avec la barre des tâches, clair
+ou sombre, et suit vos changements de thème.
 
 - **Survol** — pourcentage, tension, état de charge.
-- **Clic gauche** — relève immédiatement, sans attendre le prochain cycle.
+- **Clic gauche** — relance la lecture si elle s'était arrêtée faute de matériel.
 - **Clic droit** — démarrage automatique avec Windows, et quitter.
 
 Une notification arrive à 20 % puis à 10 %, une seule fois par décharge. Un
-éclair se superpose à l'icône pendant la charge.
+éclair se découpe dans l'icône pendant la charge.
+
+Le pourcentage exact ne figure pas dans l'icône : à seize pixels, trois
+chiffres sont illisibles et alourdissent la barre. Il est dans l'infobulle.
 
 ## La consommation
 
@@ -24,31 +29,40 @@ ordonnancé du tout.
 
 | Situation | Ce qui tourne | Coût |
 |---|---|---|
-| Rien de branché | Rien. Aucun minuteur, aucun descripteur HID ouvert. | Zéro réveil |
-| Dongle branché | Un relevé toutes les 30 s | 0,10 % d'un cœur |
-| Manette connectée | Un relevé toutes les 30 s | 0,10 % d'un cœur |
+| Rien de branché | Rien. Le fil de lecture s'est terminé. | Zéro réveil |
+| Dongle branché, manette éteinte | Une tentative toutes les 5 s | négligeable |
+| Manette connectée | Un fil à l'écoute du flux | voir ci-dessous |
 
-Mesuré sur 90 secondes, manette connectée : 94 ms de processeur pour trois
-relevés, soit une trentaine de millisecondes chacun. L'essentiel de ce temps
-part dans l'énumération HID, que `hidapi` refait à chaque appel. La mémoire
-privée tient en 2,2 Mo ; les 12 Mo affichés par le gestionnaire des tâches
-comptent les DLL système partagées avec le reste de la machine.
+La mémoire privée tient en 2,2 Mo ; les 12 Mo affichés par le gestionnaire des
+tâches comptent les DLL système partagées avec le reste de la machine.
 
 Le retour à l'état dormant est déclenché par `WM_DEVICECHANGE`, que Windows
 diffuse à toute fenêtre de premier niveau — aucun abonnement à maintenir.
 
-Une nuance assumée : tant que le dongle reste branché, le minuteur continue de
-tourner même manette éteinte. Allumer une manette déjà appairée ne produit
-aucun événement de périphérique, puisque le dongle, lui, n'a pas bougé ; sans
-ce relevé périodique, on ne verrait jamais la manette revenir.
+Une nuance assumée : tant que le dongle reste branché, le fil de lecture
+retente toutes les cinq secondes, même manette éteinte. Allumer une manette
+déjà appairée ne produit aucun événement de périphérique, puisque le dongle,
+lui, n'a pas bougé ; sans cette tentative répétée, on ne la verrait jamais
+revenir.
 
-La lecture ouvre le périphérique, attend le rapport d'alimentation, et referme.
-Garder le descripteur ouvert obligerait à drainer un flux de rapports d'entrée
-à 270 Hz en permanence, pour une donnée qui bouge toutes les vingt minutes.
+### Le compromis de la réactivité
 
-Ce rapport n'arrivant que toutes les trois secondes et demie environ, un relevé
-peut bloquer plusieurs secondes. Il se fait donc sur un fil éphémère qui poste
-son résultat à la fenêtre : le menu contextuel reste réactif pendant ce temps.
+La première version interrogeait la manette toutes les trente secondes. Poser
+la manette sur son socle mettait donc jusqu'à une demi-minute à se voir, ce qui
+est trop long pour un geste dont on attend un retour immédiat.
+
+Or la manette émet son état d'alimentation d'elle-même, toutes les trois
+secondes et demie. Un fil reste donc à l'écoute et transmet chaque rapport : la
+charge apparaît en quelques secondes, et plus aucun minuteur ne tourne.
+
+Le prix en est de traverser le flux d'entrée à 270 Hz, qui arrive sur la même
+interface. Traverser ne veut pas dire traiter : chaque rapport coûte une
+comparaison d'octet, et le noyau reçoit ces rapports de toute façon, que nous
+les lisions ou non.
+
+L'infobulle suit chaque relevé, mais l'icône n'est reconstruite que lorsque son
+dessin change réellement — sans quoi on fabriquerait une icône toutes les trois
+secondes et demie pour un résultat identique.
 
 ## Le protocole
 
@@ -99,7 +113,7 @@ configuration, et le rapport `0x7B`, qui porte de la télémétrie radio.
 ```bash
 cargo build --release      # target/release/sc-battery.exe
 cargo test                 # série complète, sans matériel
-cargo test -- --ignored    # vérification sur manette réelle
+cargo test -- --ignored    # relevé sur manette réelle, et planche de contrôle de l'icône
 ```
 
 Deux dépendances : `hidapi` pour le dialogue avec la manette, `windows-sys`
@@ -110,11 +124,11 @@ pour Win32. Ni framework graphique, ni runtime.
 | Fichier | Rôle |
 |---|---|
 | [`src/hid.rs`](src/hid.rs) | Protocole et décodage. Ne connaît pas Win32. |
-| [`src/icon.rs`](src/icon.rs) | Dessin GDI de l'icône. Fonctions pures. |
+| [`src/icon.rs`](src/icon.rs) | Dessin de l'icône, pixel par pixel. Fonctions pures. |
 | [`src/state.rs`](src/state.rs) | Machine à états, seuils de notification. Sans entrée-sortie. |
 | [`src/tray.rs`](src/tray.rs) | `Shell_NotifyIcon`, menu, ballons. |
 | [`src/autostart.rs`](src/autostart.rs) | Clé `Run` de l'utilisateur courant. |
-| [`src/main.rs`](src/main.rs) | Fenêtre cachée, minuteurs, boucle de messages. |
+| [`src/main.rs`](src/main.rs) | Fenêtre cachée, fil de lecture, boucle de messages. |
 
 ## Limites
 

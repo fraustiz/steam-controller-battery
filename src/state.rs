@@ -39,11 +39,6 @@ impl App {
         self.last_good.as_ref()
     }
 
-    /// Vrai tant qu'aucun relevé n'a abouti et qu'aucun périphérique n'est là.
-    pub fn is_absent(&self) -> bool {
-        matches!(self.last_error, Some(ProbeError::NoDevice)) && self.last_good.is_none()
-    }
-
     /// Intègre un relevé et rend la notification à émettre, s'il y a lieu.
     pub fn ingest(&mut self, reading: Result<BatteryStatus, ProbeError>) -> Option<Alert> {
         match reading {
@@ -180,7 +175,7 @@ mod tests {
         app.ingest(at(42));
         app.ingest(Err(ProbeError::NoDevice));
         assert!(app.display().is_none());
-        assert!(app.is_absent());
+        assert!(app.tooltip().contains("dongle"), "{}", app.tooltip());
     }
 
     #[test]

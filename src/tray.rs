@@ -71,6 +71,19 @@ impl Tray {
         }
     }
 
+    /// Met à jour la seule infobulle. Le niveau exact et la tension changent à
+    /// chaque relevé alors que le dessin, lui, ne bouge qu'au pourcent près :
+    /// inutile de reconstruire une icône pour ça.
+    pub fn set_tooltip(&mut self, tooltip: &str) {
+        if !self.added {
+            return;
+        }
+        fill(&mut self.data.szTip, tooltip);
+        let mut d = self.data;
+        d.uFlags = NIF_TIP;
+        unsafe { Shell_NotifyIconW(NIM_MODIFY, &d) };
+    }
+
     /// Ballon d'avertissement natif. Pas de toast WinRT, donc pas
     /// d'identifiant d'application à enregistrer.
     pub fn notify(&mut self, title: &str, body: &str) {

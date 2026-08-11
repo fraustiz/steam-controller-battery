@@ -62,6 +62,7 @@ const STATE_CHARGING: u8 = 0x04;
 
 /// Le rapport 0x43 arrive environ toutes les trois secondes et demie. Au delà
 /// de ce délai, c'est que la manette ne parle plus.
+#[cfg(test)]
 const POWER_REPORT_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Délai accordé à une interface pour prouver qu'elle émet.
@@ -124,8 +125,12 @@ pub fn parse_power_report(data: &[u8]) -> Option<BatteryStatus> {
 
 /// Lit les rapports entrants jusqu'à en trouver un d'alimentation.
 ///
+/// L'application, elle, écoute en continu par `run_reader` ; ce chemin ne sert
+/// qu'à la vérification ponctuelle sur matériel.
+///
 /// Le flux 0x42 arrive à environ 270 Hz et se traverse à vide : il ne coûte
 /// qu'une comparaison d'octet par rapport.
+#[cfg(test)]
 fn read_power_report(dev: &hidapi::HidDevice) -> Option<BatteryStatus> {
     let deadline = Instant::now() + POWER_REPORT_TIMEOUT;
     let mut buf = [0u8; 64];
@@ -143,14 +148,14 @@ fn read_power_report(dev: &hidapi::HidDevice) -> Option<BatteryStatus> {
     None
 }
 
-/// Interroge la manette et referme immédiatement le périphérique.
+/// Ouvre l'emplacement du dongle où une manette émet réellement.
 ///
-/// L'appel peut bloquer plusieurs secondes, le temps qu'un rapport
-/// d'alimentation se présente : il n'a rien à faire sur un fil chargé de
-/// traiter des messages de fenêtre.
-pub fn probe() -> Result<BatteryStatus, ProbeError> {
-    let api = hidapi::HidApi::new().map_err(|e| ProbeError::HidUnavailable(e.to_string()))?;
-
+/// Le dongle expose un emplacement par appairage possible ; seul celui d'une
+/// manette allumée produit quoi que ce soit. On les départage par une lecture
+/// courte. Rend aussi le premier rapport lu, qui est parfois déjà le bon.
+fn open_emitting_slot(
+    api: &hidapi::HidApi,
+) -> Result<(hidapi::HidDevice, Option<BatteryStatus>), ProbeError> {
     let slots: Vec<_> = api
         .device_list()
         .filter(|i| {
@@ -172,9 +177,6 @@ pub fn probe() -> Result<BatteryStatus, ProbeError> {
         });
     }
 
-    // Le dongle expose un emplacement par appairage possible ; seul celui d'une
-    // manette allumée émet quoi que ce soit. On les départage par une lecture
-    // courte avant de s'engager dans l'attente longue du rapport 0x43.
     let mut busy = None;
     for path in &slots {
         let dev = match api.open_path(path) {
@@ -185,20 +187,112 @@ pub fn probe() -> Result<BatteryStatus, ProbeError> {
             }
         };
         let mut buf = [0u8; 64];
-        let emits = matches!(dev.read_timeout(&mut buf, SLOT_PROBE_TIMEOUT), Ok(n) if n > 0);
-        if !emits {
-            continue;
+        if matches!(dev.read_timeout(&mut buf, SLOT_PROBE_TIMEOUT), Ok(n) if n > 0) {
+            let first = parse_power_report(&buf);
+            return Ok((dev, first));
         }
-        // Le tout premier rapport lu est parfois déjà le bon.
-        if let Some(s) = parse_power_report(&buf) {
-            return Ok(s);
-        }
-        if let Some(s) = read_power_report(&dev) {
-            return Ok(s);
+    }
+    Err(busy.unwrap_or(ProbeError::ControllerOffline))
+}
+
+/// Un relevé ponctuel, pour la vérification sur matériel réel.
+#[cfg(test)]
+pub fn probe() -> Result<BatteryStatus, ProbeError> {
+    let api = hidapi::HidApi::new().map_err(|e| ProbeError::HidUnavailable(e.to_string()))?;
+    let (dev, first) = open_emitting_slot(&api)?;
+    if let Some(s) = first {
+        return Ok(s);
+    }
+    read_power_report(&dev).ok_or(ProbeError::ControllerOffline)
+}
+
+/// Délai au-delà duquel un silence signifie que la manette a décroché.
+const SILENCE_TIMEOUT: Duration = Duration::from_secs(12);
+/// Attente entre deux tentatives quand le dongle est là mais pas la manette.
+const RETRY_DELAY: Duration = Duration::from_secs(5);
+
+/// Écoute les rapports d'alimentation au fil de l'eau et les transmet à mesure.
+///
+/// C'est ce qui donne à l'application sa réactivité : plutôt que d'aller
+/// chercher l'état toutes les trente secondes, on reste à l'écoute et la
+/// manette nous prévient d'elle-même toutes les trois secondes et demie. Poser
+/// la manette sur son socle se voit donc presque aussitôt.
+///
+/// La fonction ne rend la main que sur demande d'arrêt, ou lorsqu'il n'y a plus
+/// le moindre périphérique Valve — auquel cas l'appelant n'a plus qu'à dormir
+/// jusqu'au prochain branchement.
+pub fn run_reader(
+    should_stop: &std::sync::atomic::AtomicBool,
+    mut on_status: impl FnMut(Result<BatteryStatus, ProbeError>),
+) {
+    use std::sync::atomic::Ordering;
+
+    let stopping = || should_stop.load(Ordering::Relaxed);
+
+    /// Sommeil découpé, pour rester réactif à une demande d'arrêt.
+    fn nap(should_stop: &std::sync::atomic::AtomicBool, total: Duration) {
+        let deadline = Instant::now() + total;
+        while Instant::now() < deadline && !should_stop.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 
-    Err(busy.unwrap_or(ProbeError::ControllerOffline))
+    while !stopping() {
+        // L'énumération est refaite à chaque tour : c'est ainsi qu'on voit
+        // apparaître un dongle branché entre-temps.
+        let api = match hidapi::HidApi::new() {
+            Ok(a) => a,
+            Err(e) => {
+                on_status(Err(ProbeError::HidUnavailable(e.to_string())));
+                nap(should_stop, RETRY_DELAY);
+                continue;
+            }
+        };
+
+        let dev = match open_emitting_slot(&api) {
+            Ok((dev, first)) => {
+                if let Some(s) = first {
+                    on_status(Ok(s));
+                }
+                dev
+            }
+            Err(ProbeError::NoDevice) => {
+                // Plus rien de branché : inutile de garder un fil en vie.
+                on_status(Err(ProbeError::NoDevice));
+                return;
+            }
+            Err(e) => {
+                on_status(Err(e));
+                nap(should_stop, RETRY_DELAY);
+                continue;
+            }
+        };
+
+        // Écoute du flux. Le rapport 0x42 arrive à environ 270 Hz et se
+        // traverse à vide ; seul 0x43 nous intéresse.
+        let mut last_seen = Instant::now();
+        let mut buf = [0u8; 64];
+        while !stopping() {
+            match dev.read_timeout(&mut buf, 500) {
+                Ok(n) if n > 0 => {
+                    if let Some(s) = parse_power_report(&buf[..n]) {
+                        last_seen = Instant::now();
+                        on_status(Ok(s));
+                    }
+                }
+                Ok(_) => {
+                    if last_seen.elapsed() > SILENCE_TIMEOUT {
+                        break; // la manette s'est tue : on repart en découverte
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        if !stopping() {
+            on_status(Err(ProbeError::ControllerOffline));
+            nap(should_stop, RETRY_DELAY);
+        }
+    }
 }
 
 #[cfg(test)]

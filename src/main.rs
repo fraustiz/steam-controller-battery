@@ -1,25 +1,22 @@
 //! Indicateur de batterie de la Steam Controller 2026 dans la zone de
 //! notification de Windows.
 //!
+//! # Comment l'état remonte
+//!
+//! La manette émet spontanément un rapport d'alimentation toutes les trois
+//! secondes et demie environ. Plutôt que d'aller le chercher périodiquement,
+//! un fil de lecture reste à l'écoute et transmet chaque rapport à la fenêtre.
+//! Poser la manette sur son socle se voit donc en quelques secondes, sans
+//! qu'aucun minuteur ne tourne.
+//!
 //! # Pourquoi l'application ne consomme rien quand la manette est absente
 //!
-//! Le processus se réduit à une fenêtre cachée bloquée dans `GetMessage`, donc
-//! ordonnancée zéro fois par seconde. Deux choses seulement peuvent le
-//! réveiller :
-//!
-//! - `WM_DEVICECHANGE`, que Windows diffuse à toute fenêtre de premier niveau
-//!   quand l'arborescence des périphériques bouge. Aucun abonnement n'est
-//!   nécessaire, et rien ne tourne entre deux branchements ;
-//! - un `WM_TIMER`, **armé uniquement tant qu'un périphérique Valve est
-//!   énuméré**. Dès qu'il disparaît, le minuteur est détruit.
-//!
-//! # Pourquoi la lecture part sur un fil séparé
-//!
-//! L'état d'alimentation n'arrive que dans un rapport d'entrée émis toutes les
-//! trois secondes et demie environ. Une lecture peut donc bloquer plusieurs
-//! secondes, ce qui figerait le menu contextuel si elle avait lieu sur le fil
-//! de la fenêtre. Le relevé se fait sur un fil éphémère qui poste son résultat
-//! à la fenêtre une fois terminé.
+//! Le fil de lecture se termine de lui-même dès qu'il ne reste plus le moindre
+//! périphérique Valve énuméré. Il ne subsiste alors qu'une fenêtre cachée
+//! bloquée dans `GetMessage`, donc ordonnancée zéro fois par seconde. C'est
+//! `WM_DEVICECHANGE`, que Windows diffuse à toute fenêtre de premier niveau
+//! quand l'arborescence des périphériques bouge, qui relance tout — aucun
+//! abonnement à maintenir, aucun réveil entre deux branchements.
 
 #![windows_subsystem = "windows"]
 
@@ -31,6 +28,7 @@ mod tray;
 
 use std::cell::RefCell;
 use std::os::windows::ffi::OsStrExt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -42,37 +40,43 @@ use windows_sys::Win32::UI::HiDpi::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostMessageW,
     PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage, MSG, WM_APP, WM_DESTROY,
-    WM_DEVICECHANGE, WM_DPICHANGED, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+    WM_DEVICECHANGE, WM_DPICHANGED, WM_LBUTTONUP, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+    WNDCLASSW, WS_OVERLAPPED,
 };
 
 use hid::{BatteryStatus, ProbeError};
 use state::App;
 use tray::{Tray, ID_QUIT, ID_TOGGLE_AUTOSTART, WM_TRAY};
 
-/// Relevé périodique, tant qu'un périphérique Valve est là.
-const TIMER_POLL: usize = 1;
-/// Relevé unique après un changement de périphérique, le temps que Windows
-/// termine l'énumération.
-const TIMER_SETTLE: usize = 2;
-
-/// Le fil de lecture a fini et a déposé son résultat.
-const WM_PROBE_DONE: u32 = WM_APP + 2;
-
-const POLL_INTERVAL_MS: u32 = 30_000;
+/// Relance de la lecture après un changement de périphérique, le temps que
+/// Windows termine son énumération.
+const TIMER_SETTLE: usize = 1;
 const SETTLE_DELAY_MS: u32 = 1_500;
+
+/// Le fil de lecture a déposé un état.
+const WM_STATUS: u32 = WM_APP + 2;
 
 /// L'arborescence des périphériques a changé. Non exporté par `windows-sys`.
 const DBT_DEVNODES_CHANGED: WPARAM = 0x0007;
 
-/// Boîte aux lettres entre le fil de lecture et la fenêtre.
-static PROBE_RESULT: Mutex<Option<Result<BatteryStatus, ProbeError>>> = Mutex::new(None);
+/// Boîte aux lettres entre le fil de lecture et la fenêtre. Seul le dernier
+/// état compte : si la fenêtre prend du retard, les relevés intermédiaires
+/// n'ont aucun intérêt.
+static STATUS: Mutex<Option<Result<BatteryStatus, ProbeError>>> = Mutex::new(None);
+
+/// Vrai tant qu'un fil de lecture est en vie.
+static READER_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Demande d'arrêt, à la fermeture.
+static READER_STOP: AtomicBool = AtomicBool::new(false);
+
+/// Ce qui détermine le dessin de l'icône. Tant que cela ne change pas, il est
+/// inutile d'en reconstruire une.
+type Appearance = Option<(u8, bool)>;
 
 struct Ctx {
     app: App,
     tray: Tray,
-    polling: bool,
-    /// Empêche d'empiler les lectures si l'une d'elles traîne.
-    probing: bool,
+    drawn: Option<Appearance>,
 }
 
 thread_local! {
@@ -90,90 +94,80 @@ fn icon_size(hwnd: HWND) -> u32 {
     (16 * dpi / 96).clamp(16, 64)
 }
 
-/// Redessine l'icône et l'infobulle à partir de l'état courant.
+fn appearance(app: &App) -> Appearance {
+    app.display().map(|s| (s.percent, s.charging))
+}
+
+/// Reconstruit l'icône, que son apparence ait changé ou non.
 fn repaint(hwnd: HWND, ctx: &mut Ctx) {
     let hicon = icon::render(ctx.app.display(), icon_size(hwnd));
     ctx.tray.set(hicon, &ctx.app.tooltip());
+    ctx.drawn = Some(appearance(&ctx.app));
 }
 
-/// Lance une lecture sur un fil éphémère, sauf si l'une est déjà en cours.
-fn start_probe(hwnd: HWND) {
-    let already = CTX.with(|c| {
-        let mut borrow = c.borrow_mut();
-        match borrow.as_mut() {
-            Some(ctx) if ctx.probing => true,
-            Some(ctx) => {
-                ctx.probing = true;
-                false
-            }
-            None => true,
-        }
-    });
-    if already {
+/// Démarre le fil de lecture s'il n'y en a pas déjà un.
+fn ensure_reader(hwnd: HWND) {
+    if READER_ACTIVE.swap(true, Ordering::SeqCst) {
         return;
     }
-
     // `HWND` est un pointeur brut, donc non transférable entre fils tel quel.
     let target = hwnd as isize;
     std::thread::spawn(move || {
-        let result = hid::probe();
-        if let Ok(mut slot) = PROBE_RESULT.lock() {
-            *slot = Some(result);
-        }
-        unsafe { PostMessageW(target as HWND, WM_PROBE_DONE, 0, 0) };
+        hid::run_reader(&READER_STOP, |status| {
+            if let Ok(mut slot) = STATUS.lock() {
+                *slot = Some(status);
+            }
+            unsafe { PostMessageW(target as HWND, WM_STATUS, 0, 0) };
+        });
+        READER_ACTIVE.store(false, Ordering::SeqCst);
     });
 }
 
-/// Intègre le résultat déposé par le fil de lecture.
-fn finish_probe(hwnd: HWND) {
-    let Some(reading) = PROBE_RESULT.lock().ok().and_then(|mut s| s.take()) else {
+/// Intègre l'état déposé par le fil de lecture.
+fn on_status(hwnd: HWND) {
+    let Some(status) = STATUS.lock().ok().and_then(|mut s| s.take()) else {
         return;
     };
 
     CTX.with(|c| {
         let mut borrow = c.borrow_mut();
         let Some(ctx) = borrow.as_mut() else { return };
-        ctx.probing = false;
 
-        let alert = ctx.app.ingest(reading);
-        repaint(hwnd, ctx);
-        if let Some(a) = alert {
-            ctx.tray.notify(&a.title, &a.body);
+        let alert = ctx.app.ingest(status);
+
+        // L'infobulle suit chaque relevé ; l'icône, seulement les changements
+        // visibles. Sans cette distinction on reconstruirait une icône toutes
+        // les trois secondes et demie pour rien.
+        if ctx.drawn != Some(appearance(&ctx.app)) {
+            repaint(hwnd, ctx);
+        } else {
+            let tip = ctx.app.tooltip();
+            ctx.tray.set_tooltip(&tip);
         }
 
-        // Le minuteur tourne dès qu'un périphérique Valve est énuméré, même si
-        // la manette est éteinte : allumer une manette déjà appairée ne produit
-        // aucun `WM_DEVICECHANGE`, puisque le dongle, lui, n'a pas bougé. Ce
-        // n'est qu'en l'absence totale de matériel Valve que l'on peut se
-        // permettre de ne rien faire du tout et d'attendre un branchement.
-        let want_polling = !ctx.app.is_absent();
-        if want_polling && !ctx.polling {
-            unsafe { SetTimer(hwnd, TIMER_POLL, POLL_INTERVAL_MS, None) };
-            ctx.polling = true;
-        } else if !want_polling && ctx.polling {
-            unsafe { KillTimer(hwnd, TIMER_POLL) };
-            ctx.polling = false;
+        if let Some(a) = alert {
+            ctx.tray.notify(&a.title, &a.body);
         }
     });
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
-        WM_TIMER => {
-            if wp == TIMER_SETTLE {
-                KillTimer(hwnd, TIMER_SETTLE);
-            }
-            start_probe(hwnd);
+        WM_STATUS => {
+            on_status(hwnd);
             0
         }
 
-        WM_PROBE_DONE => {
-            finish_probe(hwnd);
+        WM_TIMER => {
+            if wp == TIMER_SETTLE {
+                KillTimer(hwnd, TIMER_SETTLE);
+                ensure_reader(hwnd);
+            }
             0
         }
 
         // Un branchement ou un débranchement quelque part dans la machine.
-        // On ne relève pas immédiatement : l'énumération n'est pas finie.
+        // On ne relance pas immédiatement : l'énumération n'est pas finie.
         WM_DEVICECHANGE => {
             if wp == DBT_DEVNODES_CHANGED || wp == 0 {
                 SetTimer(hwnd, TIMER_SETTLE, SETTLE_DELAY_MS, None);
@@ -183,7 +177,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 
         WM_TRAY => {
             match lp as u32 {
-                WM_LBUTTONUP => start_probe(hwnd),
+                // Un clic gauche réveille la lecture si elle s'était arrêtée
+                // faute de matériel.
+                WM_LBUTTONUP => ensure_reader(hwnd),
                 WM_RBUTTONUP => {
                     let on = autostart::is_enabled();
                     let choice = CTX.with(|c| {
@@ -197,6 +193,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                             autostart::set_enabled(!on);
                         }
                         ID_QUIT => {
+                            READER_STOP.store(true, Ordering::SeqCst);
                             PostQuitMessage(0);
                         }
                         _ => {}
@@ -207,17 +204,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
 
-        // Changement de densité : l'icône doit être redessinée à la bonne taille.
-        WM_DPICHANGED => {
+        // Changement de densité, ou bascule entre thème clair et sombre : le
+        // contour de l'icône doit reprendre la couleur qui contraste.
+        WM_DPICHANGED | WM_SETTINGCHANGE => {
             CTX.with(|c| {
                 if let Some(ctx) = c.borrow_mut().as_mut() {
                     repaint(hwnd, ctx);
                 }
             });
-            0
+            DefWindowProcW(hwnd, msg, wp, lp)
         }
 
         WM_DESTROY => {
+            READER_STOP.store(true, Ordering::SeqCst);
             PostQuitMessage(0);
             0
         }
@@ -279,22 +278,16 @@ fn main() {
         }
 
         CTX.with(|c| {
-            *c.borrow_mut() = Some(Ctx {
-                app: App::new(),
-                tray: Tray::new(hwnd),
-                polling: false,
-                probing: false,
-            });
+            *c.borrow_mut() = Some(Ctx { app: App::new(), tray: Tray::new(hwnd), drawn: None });
         });
 
-        // L'icône apparaît tout de suite, en attente ; le premier relevé peut
-        // demander plusieurs secondes.
+        // L'icône apparaît tout de suite, coque vide, le temps du premier relevé.
         CTX.with(|c| {
             if let Some(ctx) = c.borrow_mut().as_mut() {
                 repaint(hwnd, ctx);
             }
         });
-        start_probe(hwnd);
+        ensure_reader(hwnd);
 
         let mut msg: MSG = std::mem::zeroed();
         // Bloquant : tant que rien n'arrive, le processus n'est pas ordonnancé.
@@ -303,6 +296,7 @@ fn main() {
             DispatchMessageW(&msg);
         }
 
+        READER_STOP.store(true, Ordering::SeqCst);
         // Retire l'icône de la zone de notification avant de rendre la main.
         CTX.with(|c| c.borrow_mut().take());
     }

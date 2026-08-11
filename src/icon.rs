@@ -1,85 +1,338 @@
-//! Rendu de l'icône de la zone de notification, en GDI.
+//! Rendu de l'icône : une batterie verticale, dessinée pixel par pixel.
 //!
-//! Une icône Windows se compose d'une image couleur et d'un masque. On dessine
-//! dans une section DIB 32 bits, puis on impose la couche alpha nous-mêmes :
-//! GDI écrit le texte sans toucher à l'alpha, si bien que des pixels dessinés
-//! resteraient parfaitement transparents sans cette reprise.
+//! Tout est tracé à la main plutôt que par GDI. À seize pixels de côté, GDI
+//! place ses traits à la demi-unité près et rend un contour flou ; ici chaque
+//! forme est décrite analytiquement puis échantillonnée seize fois par pixel,
+//! ce qui donne un bord net à toute densité d'écran.
 
 use std::ffi::c_void;
 
-use windows_sys::Win32::Foundation::RECT;
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush, DeleteDC,
-    DeleteObject, DrawTextW, Polygon, SelectObject, SetBkMode, SetTextColor, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, CLEARTYPE_QUALITY, DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE,
-    DT_VCENTER, FF_DONTCARE, FW_BOLD, HGDIOBJ, TRANSPARENT,
+    CreateBitmap, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
 
 use crate::hid::BatteryStatus;
 
-/// Couleur du fond selon le niveau : vert franc en haut, ambre au milieu,
-/// rouge en bas. Les paliers sont choisis pour que la bascule vers l'ambre
-/// coïncide avec le premier seuil de notification.
+/// Racine du nombre d'échantillons par pixel. Quatre par quatre suffisent à
+/// lisser un contour d'un pixel d'épaisseur.
+const SUPERSAMPLE: u32 = 4;
+
+/// Couleur du remplissage selon le niveau : vert franc en haut, ambre au
+/// milieu, rouge en bas. Les paliers coïncident avec les seuils de notification.
 pub fn level_color(percent: u8) -> (u8, u8, u8) {
     const STOPS: &[(u8, (u8, u8, u8))] = &[
-        (0, (0xD1, 0x3A, 0x2F)),   // rouge
-        (10, (0xD9, 0x4B, 0x2B)),  // rouge orangé
-        (20, (0xE0, 0x8A, 0x1E)),  // ambre
-        (45, (0xC9, 0xB0, 0x1E)),  // or
-        (70, (0x4C, 0xA6, 0x3A)),  // vert
-        (100, (0x35, 0x96, 0x30)), // vert soutenu
+        (0, (0xE5, 0x48, 0x3C)),   // rouge
+        (10, (0xE8, 0x5C, 0x35)),  // rouge orangé
+        (20, (0xEF, 0x9A, 0x28)),  // ambre
+        (45, (0xD8, 0xC0, 0x28)),  // or
+        (70, (0x54, 0xB8, 0x43)),  // vert
+        (100, (0x3D, 0xA6, 0x38)), // vert soutenu
     ];
     let p = percent.min(100);
     for w in STOPS.windows(2) {
         let ((p0, c0), (p1, c1)) = (w[0], w[1]);
         if p <= p1 {
-            let span = (p1 - p0) as u32;
-            let into = (p - p0) as u32;
-            let lerp = |a: u8, b: u8| {
-                (a as i32 + (b as i32 - a as i32) * into as i32 / span.max(1) as i32) as u8
-            };
+            let span = (p1 - p0).max(1) as i32;
+            let into = (p - p0) as i32;
+            let lerp = |a: u8, b: u8| (a as i32 + (b as i32 - a as i32) * into / span) as u8;
             return (lerp(c0.0, c1.0), lerp(c0.1, c1.1), lerp(c0.2, c1.2));
         }
     }
     STOPS[STOPS.len() - 1].1
 }
 
-/// Le texte à inscrire dans l'icône. Trois caractères au maximum.
-pub fn label(status: Option<&BatteryStatus>) -> String {
-    match status {
-        Some(s) => s.percent.min(100).to_string(),
-        None => "?".into(),
+/// Le contour doit contraster avec la barre des tâches, dont le ton suit le
+/// thème du système. Une icône blanche sur une barre claire serait invisible.
+pub fn outline_color() -> (u8, u8, u8) {
+    if system_uses_light_theme() {
+        (0x3A, 0x3A, 0x3A)
+    } else {
+        // Un blanc franc écraserait le remplissage : le contour doit cadrer la
+        // couleur, pas lui disputer l'attention.
+        (0xDC, 0xDC, 0xDC)
     }
 }
 
-/// Masque en carré à coins arrondis. Rend `true` pour les pixels de l'icône.
-fn rounded_mask(size: u32) -> Vec<bool> {
-    let s = size as i32;
-    let r = (s / 4).max(1);
-    let mut m = vec![false; (size * size) as usize];
-    for y in 0..s {
-        for x in 0..s {
-            // Distance au centre du coin le plus proche, uniquement dans les coins.
-            let dx = if x < r { r - x } else if x >= s - r { x - (s - r - 1) } else { 0 };
-            let dy = if y < r { r - y } else if y >= s - r { y - (s - r - 1) } else { 0 };
-            let inside = if dx > 0 && dy > 0 {
-                dx * dx + dy * dy <= r * r
-            } else {
-                true
-            };
-            m[(y * s + x) as usize] = inside;
+fn system_uses_light_theme() -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegQueryValueExW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+    };
+
+    let wide = |s: &str| -> Vec<u16> {
+        std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
+    };
+    let path = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    let name = wide("SystemUsesLightTheme");
+
+    unsafe {
+        let mut key: HKEY = std::ptr::null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut key) != ERROR_SUCCESS {
+            return false; // à défaut, on suppose le thème sombre, le plus répandu
+        }
+        let mut value: u32 = 0;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let rc = RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            &mut value as *mut u32 as *mut u8,
+            &mut size,
+        );
+        RegCloseKey(key);
+        rc == ERROR_SUCCESS && value == 1
+    }
+}
+
+/// Géométrie de la batterie, en unités de la taille de l'icône.
+///
+/// Les proportions sont pensées pour que le dessin remplisse le carré : à
+/// seize pixels, le corps occupe neuf pixels de large sur treize de haut, ce
+/// qui laisse dix pixels utiles de remplissage — assez pour que chaque dizaine
+/// de pourcents se distingue.
+struct Geometry {
+    body: (f32, f32, f32, f32), // x0, y0, x1, y1
+    nub: (f32, f32, f32, f32),
+    inner: (f32, f32, f32, f32),
+    radius: f32,
+    stroke: f32,
+}
+
+impl Geometry {
+    fn new(size: f32) -> Self {
+        let stroke = (size / 16.0).max(1.0);
+        // Marge franche tout autour : un dessin qui affleure le bord du carré
+        // paraît rogné une fois posé dans la barre des tâches.
+        let margin = (size / 16.0).clamp(1.0, 2.0);
+        let nub_h = (size * 0.075).max(1.0);
+        let nub_y = margin;
+        // Un corps plus étroit que haut : c'est le rapport qui fait lire
+        // « batterie » plutôt que « gélule ».
+        let body = (size * 0.25, nub_y + nub_h * 0.7, size * 0.75, size - margin);
+        let nub = (size * 0.385, nub_y, size * 0.615, nub_y + nub_h + stroke);
+        // Espace minime entre le contour et le remplissage : au-delà, le
+        // contour prend un poids visuel qu'il ne doit pas avoir.
+        let gap = stroke * 0.3;
+        let inner = (
+            body.0 + stroke + gap,
+            body.1 + stroke + gap,
+            body.2 - stroke - gap,
+            body.3 - stroke - gap,
+        );
+        Self { body, nub, inner, radius: size * 0.10, stroke }
+    }
+
+    /// Hauteur du remplissage pour un niveau donné. Un niveau non nul garde
+    /// toujours au moins un filet visible : une batterie à 1 % ne doit pas
+    /// s'afficher vide.
+    fn fill_top(&self, percent: u8) -> f32 {
+        let h = self.inner.3 - self.inner.1;
+        let frac = percent.min(100) as f32 / 100.0;
+        let filled = if percent == 0 { 0.0 } else { (h * frac).max(self.stroke) };
+        self.inner.3 - filled
+    }
+}
+
+fn in_rect(x: f32, y: f32, r: (f32, f32, f32, f32)) -> bool {
+    x >= r.0 && x < r.2 && y >= r.1 && y < r.3
+}
+
+/// Rectangle à coins arrondis : hors des quatre quarts de cercle, on retombe
+/// sur un rectangle simple.
+fn in_rounded_rect(x: f32, y: f32, r: (f32, f32, f32, f32), radius: f32) -> bool {
+    if !in_rect(x, y, r) {
+        return false;
+    }
+    let radius = radius.min((r.2 - r.0) / 2.0).min((r.3 - r.1) / 2.0);
+    let cx = x.clamp(r.0 + radius, r.2 - radius);
+    let cy = y.clamp(r.1 + radius, r.3 - radius);
+    let (dx, dy) = (x - cx, y - cy);
+    dx * dx + dy * dy <= radius * radius
+}
+
+/// Test d'appartenance à un polygone, par lancer de rayon.
+fn in_polygon(x: f32, y: f32, pts: &[(f32, f32)]) -> bool {
+    let mut inside = false;
+    let mut j = pts.len() - 1;
+    for i in 0..pts.len() {
+        let (xi, yi) = pts[i];
+        let (xj, yj) = pts[j];
+        if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Distance d'un point à un segment.
+fn segment_distance(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 <= f32::EPSILON {
+        0.0
+    } else {
+        (((px - a.0) * dx + (py - a.1) * dy) / len2).clamp(0.0, 1.0)
+    };
+    let (cx, cy) = (a.0 + t * dx, a.1 + t * dy);
+    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
+}
+
+/// Le polygone, épaissi d'une largeur constante.
+///
+/// Dilater les sommets autour du centre aurait grossi la forme
+/// proportionnellement à sa taille, jusqu'à la faire sortir du cadre ; épaissir
+/// par la distance au tracé ajoute la même épaisseur partout, quelle que soit
+/// l'échelle.
+fn near_polygon(x: f32, y: f32, pts: &[(f32, f32)], width: f32) -> bool {
+    if in_polygon(x, y, pts) {
+        return true;
+    }
+    let mut j = pts.len() - 1;
+    for i in 0..pts.len() {
+        if segment_distance(x, y, pts[j], pts[i]) <= width {
+            return true;
+        }
+        j = i;
+    }
+    false
+}
+
+/// L'éclair de charge, inscrit dans le corps de la batterie.
+fn bolt_points(g: &Geometry) -> Vec<(f32, f32)> {
+    const SHAPE: &[(f32, f32)] = &[
+        (0.66, 0.00),
+        (0.06, 0.58),
+        (0.42, 0.58),
+        (0.34, 1.00),
+        (0.94, 0.40),
+        (0.58, 0.40),
+    ];
+    // L'éclair prend appui sur le corps entier, pas sur l'aire de remplissage :
+    // à seize pixels, une forme confinée à l'intérieur devient une tache.
+    let (x0, y0, x1, y1) = g.body;
+    let (w, h) = (x1 - x0, y1 - y0);
+    let inset = h * 0.06;
+    SHAPE
+        .iter()
+        .map(|(fx, fy)| (x0 + w * fx, y0 + inset + (h - 2.0 * inset) * fy))
+        .collect()
+}
+
+/// Proportion d'un pixel couverte par une forme, par suréchantillonnage.
+fn coverage(px: u32, py: u32, inside: impl Fn(f32, f32) -> bool) -> f32 {
+    let n = SUPERSAMPLE;
+    let step = 1.0 / n as f32;
+    let mut hits = 0u32;
+    for sy in 0..n {
+        for sx in 0..n {
+            let x = px as f32 + (sx as f32 + 0.5) * step;
+            let y = py as f32 + (sy as f32 + 0.5) * step;
+            if inside(x, y) {
+                hits += 1;
+            }
         }
     }
-    m
+    hits as f32 / (n * n) as f32
 }
 
-/// Construit l'icône. Le résultat est la propriété de l'appelant, qui doit la
-/// libérer par `DestroyIcon`.
+/// Composition « source par-dessus », en alpha non prémultiplié.
+fn blend(dst: &mut u32, color: (u8, u8, u8), alpha: f32) {
+    if alpha <= 0.0 {
+        return;
+    }
+    let a = alpha.min(1.0);
+    let (dr, dg, db) = (((*dst >> 16) & 0xFF) as f32, ((*dst >> 8) & 0xFF) as f32, (*dst & 0xFF) as f32);
+    let da = ((*dst >> 24) & 0xFF) as f32 / 255.0;
+
+    let out_a = a + da * (1.0 - a);
+    if out_a <= 0.0 {
+        *dst = 0;
+        return;
+    }
+    let mix = |s: u8, d: f32| ((s as f32 * a + d * da * (1.0 - a)) / out_a).round().clamp(0.0, 255.0) as u32;
+    *dst = (((out_a * 255.0).round() as u32) << 24)
+        | (mix(color.0, dr) << 16)
+        | (mix(color.1, dg) << 8)
+        | mix(color.2, db);
+}
+
+/// Retire de la matière : sert à creuser le liseré autour de l'éclair.
+fn erase(dst: &mut u32, amount: f32) {
+    if amount <= 0.0 {
+        return;
+    }
+    let keep = (1.0 - amount.min(1.0)).max(0.0);
+    let a = ((*dst >> 24) & 0xFF) as f32 * keep;
+    *dst = (*dst & 0x00FF_FFFF) | ((a.round() as u32) << 24);
+}
+
+/// Dessine l'icône dans un tampon de pixels. Séparé de toute création d'objet
+/// GDI, donc vérifiable directement.
+pub fn draw(px: &mut [u32], size: u32, status: Option<&BatteryStatus>) {
+    draw_themed(px, size, status, outline_color())
+}
+
+/// Variante à contour imposé, pour pouvoir contrôler le rendu sur les deux
+/// thèmes sans dépendre de celui de la machine.
+pub fn draw_themed(
+    px: &mut [u32],
+    size: u32,
+    status: Option<&BatteryStatus>,
+    outline: (u8, u8, u8),
+) {
+    let g = Geometry::new(size as f32);
+    let (fill_color, fill_top) = match status {
+        Some(s) => (level_color(s.percent), g.fill_top(s.percent)),
+        None => ((0x8A, 0x8A, 0x8A), g.inner.3), // niveau inconnu : coque vide
+    };
+
+    for y in 0..size {
+        for x in 0..size {
+            let i = (y * size + x) as usize;
+
+            // Contour : le corps plein moins son intérieur, plus le téton.
+            let shell = coverage(x, y, |fx, fy| {
+                (in_rounded_rect(fx, fy, g.body, g.radius)
+                    && !in_rounded_rect(fx, fy, g.inner, g.radius * 0.5))
+                    || in_rounded_rect(fx, fy, g.nub, g.radius * 0.4)
+            });
+            blend(&mut px[i], outline, shell);
+
+            // Remplissage, depuis le bas.
+            let fill = coverage(x, y, |fx, fy| {
+                fy >= fill_top && in_rounded_rect(fx, fy, g.inner, g.radius * 0.5)
+            });
+            blend(&mut px[i], fill_color, fill);
+        }
+    }
+
+    // L'éclair se pose par-dessus en deux temps : on creuse d'abord une forme
+    // légèrement dilatée, puis on trace l'éclair dedans. Le liseré vide ainsi
+    // dégagé le détache du remplissage quelle que soit la couleur de celui-ci.
+    if status.is_some_and(|s| s.charging) {
+        let bolt = bolt_points(&g);
+        let halo_width = g.stroke * 0.85;
+        for y in 0..size {
+            for x in 0..size {
+                let i = (y * size + x) as usize;
+                erase(&mut px[i], coverage(x, y, |fx, fy| near_polygon(fx, fy, &bolt, halo_width)));
+                let c = coverage(x, y, |fx, fy| in_polygon(fx, fy, &bolt));
+                blend(&mut px[i], outline, c);
+            }
+        }
+    }
+}
+
+/// Construit l'icône. Le résultat appartient à l'appelant, qui doit la libérer
+/// par `DestroyIcon`.
 pub fn render(status: Option<&BatteryStatus>, size: u32) -> HICON {
     let size = size.clamp(16, 64);
     let n = (size * size) as usize;
-    let mask = rounded_mask(size);
 
     unsafe {
         let dc = CreateCompatibleDC(std::ptr::null_mut());
@@ -97,65 +350,11 @@ pub fn render(status: Option<&BatteryStatus>, size: u32) -> HICON {
         let old = SelectObject(dc, dib as HGDIOBJ);
 
         let px = std::slice::from_raw_parts_mut(bits as *mut u32, n);
-
-        // Fond.
-        let (r, g, b) = match status {
-            Some(s) => level_color(s.percent),
-            None => (0x6B, 0x6B, 0x6B), // gris : état inconnu
-        };
-        let bg = ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
-        for (i, p) in px.iter_mut().enumerate() {
-            *p = if mask[i] { bg } else { 0 };
-        }
-
-        // Éclair de charge, dessiné avant le texte pour rester en arrière-plan.
-        if status.is_some_and(|s| s.charging) {
-            draw_bolt(dc, size);
-        }
-
-        // Texte.
-        let text = label(status);
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        let height = if wide.len() >= 3 { size * 58 / 100 } else { size * 76 / 100 };
-        let face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
-        let font = CreateFontW(
-            height as i32,
-            0,
-            0,
-            0,
-            FW_BOLD as i32,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            CLEARTYPE_QUALITY as u32,
-            FF_DONTCARE as u32,
-            face.as_ptr(),
-        );
-        let old_font = SelectObject(dc, font as HGDIOBJ);
-        SetBkMode(dc, TRANSPARENT as i32);
-        SetTextColor(dc, 0x00FF_FFFF); // blanc, en BGR
-        let mut rect = RECT { left: 0, top: 0, right: size as i32, bottom: size as i32 };
-        DrawTextW(
-            dc,
-            wide.as_ptr(),
-            wide.len() as i32,
-            &mut rect,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-        );
-        SelectObject(dc, old_font);
-        DeleteObject(font as HGDIOBJ);
-
-        // GDI a écrit le texte avec une alpha nulle : on impose l'opacité sur
-        // toute la forme, et la transparence stricte au dehors.
-        for (i, p) in px.iter_mut().enumerate() {
-            *p = if mask[i] { *p | 0xFF00_0000 } else { 0 };
-        }
+        px.fill(0);
+        draw(px, size, status);
 
         // Le masque monochrome n'est pas consulté pour une icône 32 bits avec
-        // alpha, mais `CreateIconIndirect` en exige un.
+        // couche alpha, mais `CreateIconIndirect` en exige un.
         let empty = vec![0u8; (size as usize).div_ceil(8) * size as usize];
         let mono = CreateBitmap(size as i32, size as i32, 1, 1, empty.as_ptr() as *const c_void);
 
@@ -176,36 +375,23 @@ pub fn render(status: Option<&BatteryStatus>, size: u32) -> HICON {
     }
 }
 
-/// Un éclair stylisé dans le coin supérieur droit.
-unsafe fn draw_bolt(dc: windows_sys::Win32::Graphics::Gdi::HDC, size: u32) {
-    use windows_sys::Win32::Foundation::POINT;
-
-    let s = size as i32;
-    // Boîte de l'éclair : quart supérieur droit, avec une marge.
-    let (ox, oy, w, h) = (s * 58 / 100, s * 6 / 100, s * 34 / 100, s * 40 / 100);
-    let pt = |fx: i32, fy: i32| POINT {
-        x: ox + w * fx / 100,
-        y: oy + h * fy / 100,
-    };
-    let pts = [
-        pt(55, 0),
-        pt(0, 55),
-        pt(42, 55),
-        pt(30, 100),
-        pt(100, 40),
-        pt(58, 40),
-    ];
-
-    let brush = CreateSolidBrush(0x0033_F0FF); // jaune vif, en BGR
-    let old = SelectObject(dc, brush as HGDIOBJ);
-    Polygon(dc, pts.as_ptr(), pts.len() as i32);
-    SelectObject(dc, old);
-    DeleteObject(brush as HGDIOBJ);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at(percent: u8, charging: bool) -> BatteryStatus {
+        BatteryStatus { percent, voltage_mv: None, charging }
+    }
+
+    fn buffer(size: u32, status: Option<&BatteryStatus>) -> Vec<u32> {
+        let mut px = vec![0u32; (size * size) as usize];
+        draw(&mut px, size, status);
+        px
+    }
+
+    fn opaque_pixels(px: &[u32]) -> usize {
+        px.iter().filter(|p| (*p >> 24) & 0xFF > 40).count()
+    }
 
     #[test]
     fn colour_goes_from_red_through_amber_to_green() {
@@ -216,20 +402,9 @@ mod tests {
     }
 
     #[test]
-    fn colour_is_defined_over_the_whole_range() {
-        for p in 0..=120u8 {
-            let (r, g, b) = level_color(p);
-            assert!(r as u32 + g as u32 + b as u32 > 0, "couleur nulle à {p}");
-        }
-    }
-
-    #[test]
     fn colour_transitions_are_gradual() {
-        // Aucun saut brutal : l'icône ne doit pas clignoter d'une couleur à
-        // l'autre pour un point de pourcentage.
         for p in 0..100u8 {
-            let a = level_color(p);
-            let b = level_color(p + 1);
+            let (a, b) = (level_color(p), level_color(p + 1));
             let step = (a.0 as i32 - b.0 as i32).abs()
                 + (a.1 as i32 - b.1 as i32).abs()
                 + (a.2 as i32 - b.2 as i32).abs();
@@ -238,24 +413,225 @@ mod tests {
     }
 
     #[test]
-    fn label_never_exceeds_three_characters() {
-        for p in 0..=255u8 {
-            let s = BatteryStatus { percent: p, voltage_mv: None, charging: false };
-            assert!(label(Some(&s)).len() <= 3, "étiquette trop longue pour {p}");
+    fn fill_height_grows_with_the_level() {
+        let g = Geometry::new(16.0);
+        let mut previous = f32::MAX;
+        for p in 0..=100u8 {
+            let top = g.fill_top(p);
+            assert!(top <= previous + 0.001, "le remplissage recule à {p} %");
+            assert!(top >= g.inner.1 - 0.001, "le remplissage déborde en haut à {p} %");
+            assert!(top <= g.inner.3 + 0.001, "le remplissage déborde en bas à {p} %");
+            previous = top;
         }
-        assert_eq!(label(None), "?");
     }
 
     #[test]
-    fn mask_is_square_and_carves_the_corners() {
-        for size in [16u32, 20, 24, 32] {
-            let m = rounded_mask(size);
-            assert_eq!(m.len(), (size * size) as usize);
-            assert!(!m[0], "le coin supérieur gauche doit être vide");
-            let centre = (size / 2 * size + size / 2) as usize;
-            assert!(m[centre], "le centre doit être plein");
-            let edge = (size / 2 * size) as usize;
-            assert!(m[edge], "le milieu du bord gauche doit être plein");
+    fn an_empty_battery_is_empty_and_a_full_one_is_full() {
+        let g = Geometry::new(16.0);
+        assert_eq!(g.fill_top(0), g.inner.3, "0 % doit ne rien remplir");
+        assert!((g.fill_top(100) - g.inner.1).abs() < 0.001, "100 % doit tout remplir");
+    }
+
+    #[test]
+    fn a_low_but_nonzero_level_stays_visible() {
+        let g = Geometry::new(16.0);
+        assert!(
+            g.inner.3 - g.fill_top(1) >= g.stroke,
+            "1 % doit laisser un filet visible"
+        );
+    }
+
+    #[test]
+    fn the_drawing_stays_inside_the_canvas_at_every_size() {
+        for size in [16u32, 20, 24, 32, 48, 64] {
+            let px = buffer(size, Some(&at(50, false)));
+            assert_eq!(px.len(), (size * size) as usize);
+            // Le pourtour du carré doit rester vide : rien ne doit toucher le bord.
+            for i in 0..size {
+                for &p in &[
+                    px[i as usize],
+                    px[((size - 1) * size + i) as usize],
+                    px[(i * size) as usize],
+                    px[(i * size + size - 1) as usize],
+                ] {
+                    assert_eq!(p >> 24, 0, "le dessin touche le bord à la taille {size}");
+                }
+            }
         }
+    }
+
+    #[test]
+    fn a_fuller_battery_paints_more_pixels() {
+        let empty = opaque_pixels(&buffer(32, Some(&at(0, false))));
+        let half = opaque_pixels(&buffer(32, Some(&at(50, false))));
+        let full = opaque_pixels(&buffer(32, Some(&at(100, false))));
+        assert!(half > empty, "50 % doit peindre plus que 0 %");
+        assert!(full > half, "100 % doit peindre plus que 50 %");
+    }
+
+    #[test]
+    fn the_unknown_state_draws_a_shell_but_no_fill() {
+        let unknown = opaque_pixels(&buffer(32, None));
+        let empty = opaque_pixels(&buffer(32, Some(&at(0, false))));
+        assert!(unknown > 0, "l'état inconnu doit tout de même dessiner la coque");
+        assert!(
+            unknown.abs_diff(empty) < empty / 4,
+            "l'état inconnu doit ressembler à une batterie vide"
+        );
+    }
+
+    #[test]
+    fn charging_adds_the_bolt() {
+        let plain = buffer(32, Some(&at(50, false)));
+        let charging = buffer(32, Some(&at(50, true)));
+        assert_ne!(plain, charging, "l'éclair doit modifier le dessin");
+    }
+
+    #[test]
+    fn every_pixel_is_either_transparent_or_coloured() {
+        // Un pixel opaque totalement noir trahirait une composition ratée.
+        for p in buffer(32, Some(&at(70, true))) {
+            let (a, rgb) = (p >> 24, p & 0x00FF_FFFF);
+            assert!(a == 0 || rgb != 0, "pixel opaque sans couleur");
+        }
+    }
+
+    /// Compose l'icône sur un fond donné, comme le ferait la barre des tâches.
+    fn over(background: (u8, u8, u8), px: u32) -> (u8, u8, u8) {
+        let a = ((px >> 24) & 0xFF) as f32 / 255.0;
+        let src = (((px >> 16) & 0xFF) as f32, ((px >> 8) & 0xFF) as f32, (px & 0xFF) as f32);
+        let mix = |s: f32, d: u8| (s * a + d as f32 * (1.0 - a)).round() as u8;
+        (mix(src.0, background.0), mix(src.1, background.1), mix(src.2, background.2))
+    }
+
+    /// Écrit une planche de contrôle visuelle. Le rendu d'une icône de seize
+    /// pixels ne se juge pas sur des assertions : il faut le regarder, sur
+    /// fond clair comme sur fond sombre.
+    ///
+    /// `cargo test -- --ignored render_preview_sheet`
+    #[test]
+    #[ignore = "génère un fichier à inspecter à l'œil"]
+    fn render_preview_sheet() {
+        let cases: &[(&str, Option<BatteryStatus>)] = &[
+            ("100", Some(at(100, false))),
+            ("70", Some(at(70, false))),
+            ("45", Some(at(45, false))),
+            ("15", Some(at(15, false))),
+            ("5", Some(at(5, false))),
+            ("charge", Some(at(60, true))),
+            ("inconnu", None),
+        ];
+        // Fond de barre des tâches et contour associé, pour contrôler les deux
+        // thèmes sans dépendre de celui de la machine.
+        let backgrounds: &[((u8, u8, u8), (u8, u8, u8))] = &[
+            ((0x20, 0x20, 0x20), (0xDC, 0xDC, 0xDC)),
+            ((0xF3, 0xF3, 0xF3), (0x3A, 0x3A, 0x3A)),
+        ];
+
+        const ICON: u32 = 16;
+        const ZOOM: u32 = 10;
+        const PAD: u32 = 6;
+        let cell = ICON * ZOOM + PAD * 2;
+        let strip = ICON + PAD * 2;
+        let w = cell * cases.len() as u32;
+        let h = (cell + strip) * backgrounds.len() as u32;
+
+        let mut img = vec![(0u8, 0u8, 0u8); (w * h) as usize];
+        for (bi, &(bg, outline)) in backgrounds.iter().enumerate() {
+            let band_top = bi as u32 * (cell + strip);
+            for y in band_top..(band_top + cell + strip).min(h) {
+                for x in 0..w {
+                    img[(y * w + x) as usize] = bg;
+                }
+            }
+            for (ci, (_, status)) in cases.iter().enumerate() {
+                let mut px = vec![0u32; (ICON * ICON) as usize];
+                draw_themed(&mut px, ICON, status.as_ref(), outline);
+                let ox = ci as u32 * cell + PAD;
+
+                // Version agrandie, pour juger le tracé.
+                for y in 0..ICON * ZOOM {
+                    for x in 0..ICON * ZOOM {
+                        let p = px[((y / ZOOM) * ICON + x / ZOOM) as usize];
+                        img[((band_top + PAD + y) * w + ox + x) as usize] = over(bg, p);
+                    }
+                }
+                // Version à taille réelle, pour juger la lisibilité.
+                for y in 0..ICON {
+                    for x in 0..ICON {
+                        let p = px[(y * ICON + x) as usize];
+                        img[((band_top + cell + PAD + y) * w + ox + x) as usize] = over(bg, p);
+                    }
+                }
+            }
+        }
+
+        // BMP 24 bits, lignes de bas en haut, chaque ligne alignée sur 4 octets.
+        let row = (w * 3).next_multiple_of(4) as usize;
+        let pixel_data = row * h as usize;
+        let mut out = Vec::with_capacity(54 + pixel_data);
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&((54 + pixel_data) as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&54u32.to_le_bytes());
+        out.extend_from_slice(&40u32.to_le_bytes());
+        out.extend_from_slice(&(w as i32).to_le_bytes());
+        out.extend_from_slice(&(h as i32).to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&24u16.to_le_bytes());
+        out.extend_from_slice(&[0u8; 24]);
+        for y in (0..h).rev() {
+            let start = out.len();
+            for x in 0..w {
+                let (r, g, b) = img[(y * w + x) as usize];
+                out.extend_from_slice(&[b, g, r]);
+            }
+            out.resize(start + row, 0);
+        }
+
+        let path = std::env::temp_dir().join("sc-battery-preview.bmp");
+        std::fs::write(&path, &out).expect("écriture de la planche");
+        println!("planche écrite : {}", path.display());
+    }
+
+    #[test]
+    fn coverage_is_bounded_and_meaningful() {
+        assert_eq!(coverage(0, 0, |_, _| false), 0.0);
+        assert_eq!(coverage(0, 0, |_, _| true), 1.0);
+        let half = coverage(0, 0, |x, _| x < 0.5);
+        assert!((half - 0.5).abs() < 0.01, "couverture d'un demi-pixel : {half}");
+    }
+
+    #[test]
+    fn rounded_corners_are_actually_carved() {
+        let r = (0.0, 0.0, 10.0, 10.0);
+        assert!(!in_rounded_rect(0.1, 0.1, r, 3.0), "le coin doit être vide");
+        assert!(in_rounded_rect(5.0, 5.0, r, 3.0), "le centre doit être plein");
+        assert!(in_rounded_rect(0.1, 5.0, r, 3.0), "le milieu du bord doit être plein");
+    }
+
+    #[test]
+    fn the_bolt_polygon_is_closed_and_inside_the_body() {
+        let g = Geometry::new(32.0);
+        let pts = bolt_points(&g);
+        assert!(pts.len() >= 6);
+        for (x, y) in &pts {
+            assert!(*x >= g.body.0 - 0.01 && *x <= g.body.2 + 0.01, "éclair hors du corps");
+            assert!(*y >= g.body.1 - 0.01 && *y <= g.body.3 + 0.01, "éclair hors du corps");
+        }
+        // Le liseré, d'épaisseur constante, ne doit pas non plus sortir du carré.
+        for px in 0..32u32 {
+            for py in 0..32u32 {
+                if near_polygon(px as f32, py as f32, &pts, g.stroke * 0.85) {
+                    assert!((1..31).contains(&px) && (1..31).contains(&py), "liseré hors cadre");
+                }
+            }
+        }
+        // Le centre géométrique doit tomber dans le polygone.
+        assert!(in_polygon(
+            pts.iter().map(|p| p.0).sum::<f32>() / pts.len() as f32,
+            pts.iter().map(|p| p.1).sum::<f32>() / pts.len() as f32,
+            &pts
+        ));
     }
 }
