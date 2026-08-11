@@ -10,12 +10,16 @@
 //! - `WM_DEVICECHANGE`, que Windows diffuse à toute fenêtre de premier niveau
 //!   quand l'arborescence des périphériques bouge. Aucun abonnement n'est
 //!   nécessaire, et rien ne tourne entre deux branchements ;
-//! - un `WM_TIMER`, **armé uniquement tant qu'une manette répond**. Dès qu'elle
-//!   disparaît, le minuteur est détruit et l'on retombe à zéro réveil.
+//! - un `WM_TIMER`, **armé uniquement tant qu'un périphérique Valve est
+//!   énuméré**. Dès qu'il disparaît, le minuteur est détruit.
 //!
-//! La lecture elle-même ouvre le périphérique HID, pose sa question et le
-//! referme, plutôt que de garder un descripteur ouvert sur un flux de rapports
-//! à 270 Hz qu'il faudrait drainer en permanence.
+//! # Pourquoi la lecture part sur un fil séparé
+//!
+//! L'état d'alimentation n'arrive que dans un rapport d'entrée émis toutes les
+//! trois secondes et demie environ. Une lecture peut donc bloquer plusieurs
+//! secondes, ce qui figerait le menu contextuel si elle avait lieu sur le fil
+//! de la fenêtre. Le relevé se fait sur un fil éphémère qui poste son résultat
+//! à la fenêtre une fois terminé.
 
 #![windows_subsystem = "windows"]
 
@@ -27,6 +31,7 @@ mod tray;
 
 use std::cell::RefCell;
 use std::os::windows::ffi::OsStrExt;
+use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -35,19 +40,23 @@ use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostQuitMessage,
-    RegisterClassW, SetTimer, TranslateMessage, MSG, WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED,
-    WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, KillTimer, PostMessageW,
+    PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage, MSG, WM_APP, WM_DESTROY,
+    WM_DEVICECHANGE, WM_DPICHANGED, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
 };
 
+use hid::{BatteryStatus, ProbeError};
 use state::App;
 use tray::{Tray, ID_QUIT, ID_TOGGLE_AUTOSTART, WM_TRAY};
 
-/// Relevé périodique, tant qu'une manette répond.
+/// Relevé périodique, tant qu'un périphérique Valve est là.
 const TIMER_POLL: usize = 1;
 /// Relevé unique après un changement de périphérique, le temps que Windows
 /// termine l'énumération.
 const TIMER_SETTLE: usize = 2;
+
+/// Le fil de lecture a fini et a déposé son résultat.
+const WM_PROBE_DONE: u32 = WM_APP + 2;
 
 const POLL_INTERVAL_MS: u32 = 30_000;
 const SETTLE_DELAY_MS: u32 = 1_500;
@@ -55,10 +64,15 @@ const SETTLE_DELAY_MS: u32 = 1_500;
 /// L'arborescence des périphériques a changé. Non exporté par `windows-sys`.
 const DBT_DEVNODES_CHANGED: WPARAM = 0x0007;
 
+/// Boîte aux lettres entre le fil de lecture et la fenêtre.
+static PROBE_RESULT: Mutex<Option<Result<BatteryStatus, ProbeError>>> = Mutex::new(None);
+
 struct Ctx {
     app: App,
     tray: Tray,
     polling: bool,
+    /// Empêche d'empiler les lectures si l'une d'elles traîne.
+    probing: bool,
 }
 
 thread_local! {
@@ -76,17 +90,53 @@ fn icon_size(hwnd: HWND) -> u32 {
     (16 * dpi / 96).clamp(16, 64)
 }
 
-/// Interroge la manette, met à jour l'icône, et ajuste le minuteur.
-fn refresh(hwnd: HWND) {
-    let reading = hid::probe();
+/// Redessine l'icône et l'infobulle à partir de l'état courant.
+fn repaint(hwnd: HWND, ctx: &mut Ctx) {
+    let hicon = icon::render(ctx.app.display(), icon_size(hwnd));
+    ctx.tray.set(hicon, &ctx.app.tooltip());
+}
+
+/// Lance une lecture sur un fil éphémère, sauf si l'une est déjà en cours.
+fn start_probe(hwnd: HWND) {
+    let already = CTX.with(|c| {
+        let mut borrow = c.borrow_mut();
+        match borrow.as_mut() {
+            Some(ctx) if ctx.probing => true,
+            Some(ctx) => {
+                ctx.probing = true;
+                false
+            }
+            None => true,
+        }
+    });
+    if already {
+        return;
+    }
+
+    // `HWND` est un pointeur brut, donc non transférable entre fils tel quel.
+    let target = hwnd as isize;
+    std::thread::spawn(move || {
+        let result = hid::probe();
+        if let Ok(mut slot) = PROBE_RESULT.lock() {
+            *slot = Some(result);
+        }
+        unsafe { PostMessageW(target as HWND, WM_PROBE_DONE, 0, 0) };
+    });
+}
+
+/// Intègre le résultat déposé par le fil de lecture.
+fn finish_probe(hwnd: HWND) {
+    let Some(reading) = PROBE_RESULT.lock().ok().and_then(|mut s| s.take()) else {
+        return;
+    };
 
     CTX.with(|c| {
         let mut borrow = c.borrow_mut();
         let Some(ctx) = borrow.as_mut() else { return };
+        ctx.probing = false;
 
         let alert = ctx.app.ingest(reading);
-        let hicon = icon::render(ctx.app.display(), icon_size(hwnd));
-        ctx.tray.set(hicon, &ctx.app.tooltip());
+        repaint(hwnd, ctx);
         if let Some(a) = alert {
             ctx.tray.notify(&a.title, &a.body);
         }
@@ -113,7 +163,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if wp == TIMER_SETTLE {
                 KillTimer(hwnd, TIMER_SETTLE);
             }
-            refresh(hwnd);
+            start_probe(hwnd);
+            0
+        }
+
+        WM_PROBE_DONE => {
+            finish_probe(hwnd);
             0
         }
 
@@ -128,7 +183,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 
         WM_TRAY => {
             match lp as u32 {
-                WM_LBUTTONUP => refresh(hwnd),
+                WM_LBUTTONUP => start_probe(hwnd),
                 WM_RBUTTONUP => {
                     let on = autostart::is_enabled();
                     let choice = CTX.with(|c| {
@@ -154,7 +209,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 
         // Changement de densité : l'icône doit être redessinée à la bonne taille.
         WM_DPICHANGED => {
-            refresh(hwnd);
+            CTX.with(|c| {
+                if let Some(ctx) = c.borrow_mut().as_mut() {
+                    repaint(hwnd, ctx);
+                }
+            });
             0
         }
 
@@ -224,10 +283,18 @@ fn main() {
                 app: App::new(),
                 tray: Tray::new(hwnd),
                 polling: false,
+                probing: false,
             });
         });
 
-        refresh(hwnd);
+        // L'icône apparaît tout de suite, en attente ; le premier relevé peut
+        // demander plusieurs secondes.
+        CTX.with(|c| {
+            if let Some(ctx) = c.borrow_mut().as_mut() {
+                repaint(hwnd, ctx);
+            }
+        });
+        start_probe(hwnd);
 
         let mut msg: MSG = std::mem::zeroed();
         // Bloquant : tant que rien n'arrive, le processus n'est pas ordonnancé.

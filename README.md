@@ -42,10 +42,13 @@ tourner même manette éteinte. Allumer une manette déjà appairée ne produit
 aucun événement de périphérique, puisque le dongle, lui, n'a pas bougé ; sans
 ce relevé périodique, on ne verrait jamais la manette revenir.
 
-La lecture ouvre le périphérique, pose sa question et le referme. Garder le
-descripteur ouvert obligerait à drainer un flux de rapports d'entrée à 270 Hz,
-ce qui coûterait du processeur en permanence pour une donnée qui bouge toutes
-les vingt minutes.
+La lecture ouvre le périphérique, attend le rapport d'alimentation, et referme.
+Garder le descripteur ouvert obligerait à drainer un flux de rapports d'entrée
+à 270 Hz en permanence, pour une donnée qui bouge toutes les vingt minutes.
+
+Ce rapport n'arrivant que toutes les trois secondes et demie environ, un relevé
+peut bloquer plusieurs secondes. Il se fait donc sur un fil éphémère qui poste
+son résultat à la fenêtre : le menu contextuel reste réactif pendant ce temps.
 
 ## Le protocole
 
@@ -53,34 +56,43 @@ Rien de tout cela n'est documenté par Valve ; l'ensemble a été établi en
 sondant le matériel. Le détail vit dans l'en-tête de [`src/hid.rs`](src/hid.rs).
 
 Le dongle (PID `0x1304`) expose plusieurs interfaces HID en `usage_page`
-`0xFF00`. Celle d'`usage` `0x0002` est l'interface de contrôle. Les commandes
-passent par des *feature reports numérotés* de 64 octets, dont l'identifiant
-choisit le destinataire : `0x01` la manette (PID `0x1302`), `0x02` le dongle.
+`0xFF00`. Celle d'`usage` `0x0002` est l'interface de contrôle ; les autres,
+d'`usage` `0x0001`, sont les emplacements d'appairage — une seule émet, celle
+où la manette est réellement connectée.
+
+Les rapports d'entrée sont numérotés. Deux comptent :
+
+| identifiant | débit | contenu |
+|---|---|---|
+| `0x42` | ~270 Hz | boutons, axes, trackpads, gyroscope |
+| `0x43` | ~0,3 Hz | **état d'alimentation** |
+
+Le rapport `0x43` fait quinze octets :
 
 ```text
-[id_rapport, commande, longueur_args, args...]
+[0] 0x43        identifiant du rapport
+[1] état        0x01 sur batterie, 0x04 en charge
+[2] pourcentage 0 à 100
+[3] tension     16 bits petit-boutiste, en millivolts
+[5] ...         seconde tension, rôle non établi
 ```
 
-La commande `0x83` rend les attributs sous forme de triplets
-`(identifiant, valeur sur 32 bits)`. L'attribut `0x0B` porte la mesure de
-batterie, et n'apparaît que chez la manette — jamais chez le dongle, qui n'a
-pas de batterie.
+Le format a été établi en confrontant des relevés à des états connus. Sur le
+puck en charge, l'octet [2] valait `100` et l'octet [1] valait `0x04`. Hors du
+puck, [2] est tombé à `94` — exactement la valeur rapportée par ailleurs — et
+[1] à `0x01`.
 
-### Ce qui reste incertain
+### Fausses pistes, pour mémoire
 
-L'attribut `0x0B` vaut `4000` et n'a pas varié d'un millivolt sur quatre
-minutes d'observation. C'est cohérent avec une tension de cellule Li-ion au
-repos, convertie ici en pourcentage par une courbe de décharge de référence
-(4000 mV donnent 80 %). Mais la confirmation définitive demande de voir la
-valeur monter pendant une charge — un test qui n'a pas encore pu être fait.
+L'attribut `0x0B`, rendu par la commande `0x83` sur le canal de commande, vaut
+`4000` quel que soit l'état réel de la batterie : à 100 % en charge comme à
+94 % sur batterie, et sans varier d'un millivolt sur quatre minutes
+d'observation. C'est une constante de conception, probablement la tension
+nominale de la cellule. Elle ressemble suffisamment à une mesure pour avoir
+coûté une hypothèse entière.
 
-Si `0x0B` se révélait être une constante et non une mesure, seule la fonction
-`status_from_attributes` serait à revoir : le reste de l'application ne connaît
-rien du format.
-
-Les autres pistes ont été écartées par l'observation : les rapports d'entrée
-`0x43` et `0x7B` portent de la télémétrie radio (puissance de réception,
-pertes), et les registres lus par la commande `0x89` sont de la configuration.
+Écartés de même : les registres lus par la commande `0x89`, qui sont de la
+configuration, et le rapport `0x7B`, qui porte de la télémétrie radio.
 
 ## Construction
 
