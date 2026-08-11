@@ -11,6 +11,10 @@ notification : le remplissage suit le niveau, du vert au rouge en passant par
 l'ambre. Le contour prend le ton qui contraste avec la barre des tâches, clair
 ou sombre, et suit vos changements de thème.
 
+Sans manette connectée, l'icône devient **une prise**, et non une batterie
+vide : une batterie vide se lirait « 0 % », ce qui est un contresens quand on
+n'a aucune mesure.
+
 - **Survol** — pourcentage, tension, état de charge.
 - **Clic gauche** — relance la lecture si elle s'était arrêtée faute de matériel.
 - **Clic droit** — démarrage automatique avec Windows, et quitter.

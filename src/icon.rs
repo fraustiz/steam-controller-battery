@@ -285,11 +285,45 @@ pub fn draw_themed(
     status: Option<&BatteryStatus>,
     outline: (u8, u8, u8),
 ) {
+    match status {
+        Some(s) => draw_battery(px, size, s, outline),
+        // Sans relevé, dessiner une batterie vide serait un contresens : on la
+        // lirait comme une batterie à plat. Une prise dit « pas de liaison »,
+        // ce qui est la vérité.
+        None => draw_plug(px, size, outline),
+    }
+}
+
+/// Une prise électrique : deux broches, un corps, un début de cordon.
+///
+/// Les formes sont pleines et non détourées : à seize pixels, un contour d'un
+/// pixel autour d'un objet aussi petit se referme sur lui-même et devient une
+/// tache.
+fn draw_plug(px: &mut [u32], size: u32, color: (u8, u8, u8)) {
+    let s = size as f32;
+    let r = s * 0.07;
+    let prong_left = (s * 0.30, s * 0.10, s * 0.42, s * 0.40);
+    let prong_right = (s * 0.58, s * 0.10, s * 0.70, s * 0.40);
+    let body = (s * 0.20, s * 0.33, s * 0.80, s * 0.66);
+    let cord = (s * 0.43, s * 0.62, s * 0.57, s * 0.90);
+
+    for y in 0..size {
+        for x in 0..size {
+            let c = coverage(x, y, |fx, fy| {
+                in_rounded_rect(fx, fy, prong_left, r * 0.6)
+                    || in_rounded_rect(fx, fy, prong_right, r * 0.6)
+                    || in_rounded_rect(fx, fy, body, r)
+                    || in_rounded_rect(fx, fy, cord, r * 0.5)
+            });
+            blend(&mut px[(y * size + x) as usize], color, c);
+        }
+    }
+}
+
+fn draw_battery(px: &mut [u32], size: u32, status: &BatteryStatus, outline: (u8, u8, u8)) {
     let g = Geometry::new(size as f32);
-    let (fill_color, fill_top) = match status {
-        Some(s) => (level_color(s.percent), g.fill_top(s.percent)),
-        None => ((0x8A, 0x8A, 0x8A), g.inner.3), // niveau inconnu : coque vide
-    };
+    let fill_color = level_color(status.percent);
+    let fill_top = g.fill_top(status.percent);
 
     for y in 0..size {
         for x in 0..size {
@@ -314,7 +348,7 @@ pub fn draw_themed(
     // L'éclair se pose par-dessus en deux temps : on creuse d'abord une forme
     // légèrement dilatée, puis on trace l'éclair dedans. Le liseré vide ainsi
     // dégagé le détache du remplissage quelle que soit la couleur de celui-ci.
-    if status.is_some_and(|s| s.charging) {
+    if status.charging {
         let bolt = bolt_points(&g);
         let halo_width = g.stroke * 0.85;
         for y in 0..size {
@@ -470,14 +504,35 @@ mod tests {
     }
 
     #[test]
-    fn the_unknown_state_draws_a_shell_but_no_fill() {
-        let unknown = opaque_pixels(&buffer(32, None));
-        let empty = opaque_pixels(&buffer(32, Some(&at(0, false))));
-        assert!(unknown > 0, "l'état inconnu doit tout de même dessiner la coque");
+    fn a_disconnected_controller_draws_a_plug_not_an_empty_battery() {
+        let disconnected = buffer(32, None);
+        let flat = buffer(32, Some(&at(0, false)));
+        assert!(opaque_pixels(&disconnected) > 0, "il faut bien dessiner quelque chose");
+        // Le point de tout ceci : une batterie vide se lirait « 0 % », ce qui
+        // est un contresens quand on n'a aucune mesure.
+        assert_ne!(disconnected, flat, "la prise doit se distinguer d'une batterie à plat");
+
+        // La prise est une forme pleine, la batterie vide un simple contour :
+        // la première doit peindre nettement plus de matière.
         assert!(
-            unknown.abs_diff(empty) < empty / 4,
-            "l'état inconnu doit ressembler à une batterie vide"
+            opaque_pixels(&disconnected) > opaque_pixels(&flat),
+            "la prise doit être plus dense qu'un contour vide"
         );
+    }
+
+    #[test]
+    fn the_plug_is_a_single_connected_shape() {
+        // Une prise dont les broches flotteraient loin du corps se lirait comme
+        // trois taches sans rapport. On vérifie qu'aucune colonne peinte n'est
+        // isolée : le dessin doit tenir d'un seul tenant horizontalement.
+        let px = buffer(32, None);
+        let painted: Vec<usize> = (0..32)
+            .filter(|&x| (0..32).any(|y| (px[y * 32 + x] >> 24) & 0xFF > 40))
+            .collect();
+        assert!(!painted.is_empty());
+        for w in painted.windows(2) {
+            assert_eq!(w[1] - w[0], 1, "colonne vide au milieu de la prise");
+        }
     }
 
     #[test]
