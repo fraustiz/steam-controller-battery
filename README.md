@@ -25,8 +25,14 @@ ordonnancé du tout.
 | Situation | Ce qui tourne | Coût |
 |---|---|---|
 | Rien de branché | Rien. Aucun minuteur, aucun descripteur HID ouvert. | Zéro réveil |
-| Dongle branché | Un relevé toutes les 30 s | ~2 ms par relevé |
-| Manette connectée | Un relevé toutes les 30 s | ~2 ms par relevé |
+| Dongle branché | Un relevé toutes les 30 s | 0,10 % d'un cœur |
+| Manette connectée | Un relevé toutes les 30 s | 0,10 % d'un cœur |
+
+Mesuré sur 90 secondes, manette connectée : 94 ms de processeur pour trois
+relevés, soit une trentaine de millisecondes chacun. L'essentiel de ce temps
+part dans l'énumération HID, que `hidapi` refait à chaque appel. La mémoire
+privée tient en 2,2 Mo ; les 12 Mo affichés par le gestionnaire des tâches
+comptent les DLL système partagées avec le reste de la machine.
 
 Le retour à l'état dormant est déclenché par `WM_DEVICECHANGE`, que Windows
 diffuse à toute fenêtre de premier niveau — aucun abonnement à maintenir.
