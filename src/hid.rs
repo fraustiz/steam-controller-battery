@@ -20,17 +20,28 @@
 //! Le rapport 0x43 fait quinze octets et se lit ainsi :
 //!
 //! ```text
-//! [0] 0x43        identifiant du rapport
-//! [1] état        0x01 sur batterie, 0x04 en charge
-//! [2] pourcentage 0 à 100
-//! [3] tension     16 bits petit-boutiste, en millivolts
-//! [5] ...         seconde tension, rôle non établi
+//! [0] 0x43         identifiant du rapport
+//! [1] état         0x01 décharge, 0x02 en charge, 0x04 chargée
+//! [2] pourcentage  0 à 100
+//! [3] tension      cellule, 16 bits petit-boutiste, en millivolts
+//! [5] tension      seconde valeur, rôle non établi
+//! [7] alimentation 16 bits petit-boutiste, en millivolts ; nulle hors secteur
+//! [9] courant      16 bits petit-boutiste, en milliampères ; nul à pleine charge
 //! ```
 //!
-//! Ce format a été établi en comparant des relevés à des états connus : sur le
-//! puck en charge, l'octet [2] valait 100 et l'octet [1] valait 0x04 ; hors du
-//! puck, [2] est tombé à 94 — exactement la valeur rapportée par ailleurs —
-//! et [1] à 0x01.
+//! Ce format a été établi en confrontant des relevés à des états connus. Hors
+//! du puck, [2] valait 94 — exactement la valeur rapportée par ailleurs.
+//!
+//! L'octet [1] a d'abord été mal lu. Un unique relevé sur le puck le montrait à
+//! 0x04, d'où la conclusion hâtive « 0x04 signifie en charge ». La batterie y
+//! était en réalité déjà pleine : 0x04 veut dire « chargée », et c'est 0x02 qui
+//! signale une charge en cours. Généraliser depuis un seul point de mesure
+//! avait produit un indicateur qui ne s'allumait jamais.
+//!
+//! De cette correction vient le choix de ne pas faire reposer la détection sur
+//! le seul octet d'état : les octets [7] et [9] sont des mesures — tension
+//! d'alimentation et courant de charge — et une mesure ment moins qu'un code
+//! dont on n'a pas vu toutes les valeurs.
 //!
 //! # Ce qui a été écarté
 //!
@@ -55,10 +66,13 @@ const RPT_POWER: u8 = 0x43;
 /// Longueur utile du rapport 0x43, identifiant compris.
 const RPT_POWER_LEN: usize = 15;
 
-/// Seul état observé signalant une charge en cours. Sur batterie, l'octet
-/// vaut 0x01 ; les autres valeurs n'ont pas été rencontrées et sont traitées
-/// comme « pas en charge ».
-const STATE_CHARGING: u8 = 0x04;
+/// États observés dans l'octet [1].
+const STATE_CHARGING: u8 = 0x02;
+const STATE_CHARGED: u8 = 0x04;
+
+/// Tension minimale pour tenir l'alimentation pour réelle. Une source branchée
+/// se lit autour de 4800 mV ; débranchée, l'octet tombe franchement à zéro.
+const SUPPLY_PRESENT_MV: u16 = 3000;
 
 /// Le rapport 0x43 arrive environ toutes les trois secondes et demie. Au delà
 /// de ce délai, c'est que la manette ne parle plus.
@@ -74,7 +88,10 @@ pub struct BatteryStatus {
     pub percent: u8,
     /// Tension de la cellule en millivolts.
     pub voltage_mv: Option<u16>,
+    /// La manette est alimentée : posée sur son socle ou reliée par câble.
     pub charging: bool,
+    /// Alimentée, mais la charge est terminée — le courant est retombé à zéro.
+    pub full: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,11 +132,22 @@ pub fn parse_power_report(data: &[u8]) -> Option<BatteryStatus> {
         return None;
     }
     let voltage = u16::from_le_bytes([data[3], data[4]]);
+    let supply_mv = u16::from_le_bytes([data[7], data[8]]);
+    let current_ma = u16::from_le_bytes([data[9], data[10]]);
+    let state = data[1];
+
+    // La tension d'alimentation prime sur l'octet d'état : c'est une mesure,
+    // et elle reste vraie même pour un état que nous n'aurions jamais observé.
+    let charging = supply_mv >= SUPPLY_PRESENT_MV
+        || matches!(state, STATE_CHARGING | STATE_CHARGED);
+
     Some(BatteryStatus {
         percent,
         // Une tension nulle ou absurde vaut mieux tue qu'affichée de travers.
         voltage_mv: (2000..=5000).contains(&voltage).then_some(voltage),
-        charging: data[1] == STATE_CHARGING,
+        charging,
+        // Plus de courant qui entre alors que la source est là : c'est fini.
+        full: charging && (state == STATE_CHARGED || current_ma == 0),
     })
 }
 
@@ -299,13 +327,20 @@ pub fn run_reader(
 mod tests {
     use super::*;
 
-    /// Relevé réel, manette sur le puck : 100 % et en charge.
-    const ON_PUCK: &[u8] = &[
+    /// Relevé réel, manette sur le puck, batterie pleine : alimentée, mais le
+    /// courant de charge est retombé à zéro.
+    const FULL_ON_PUCK: &[u8] = &[
         0x43, 0x04, 0x64, 0x2F, 0x10, 0x40, 0x10, 0xFC, 0x12, 0x00, 0x00, 0x85, 0x00, 0xB6, 0x7A,
     ];
 
+    /// Relevé réel, charge réellement en cours : 96 %, alimentation à 4800 mV,
+    /// courant de 175 mA.
+    const CHARGING: &[u8] = &[
+        0x43, 0x02, 0x60, 0x3F, 0x10, 0x68, 0x10, 0xC0, 0x12, 0xAF, 0x00, 0x31, 0x01, 0xCD, 0x78,
+    ];
+
     /// Relevé réel, manette hors du puck : 94 %, valeur confirmée par ailleurs.
-    const ON_BATTERY: &[u8] = &[
+    const OFF_PUCK: &[u8] = &[
         0x43, 0x01, 0x5E, 0x17, 0x10, 0x2C, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xB6, 0x7A,
     ];
 
@@ -318,18 +353,37 @@ mod tests {
 
     #[test]
     fn reads_the_confirmed_ninety_four_percent() {
-        let s = parse_power_report(ON_BATTERY).expect("rapport valide");
+        let s = parse_power_report(OFF_PUCK).expect("rapport valide");
         assert_eq!(s.percent, 94);
         assert_eq!(s.voltage_mv, Some(4119));
         assert!(!s.charging);
     }
 
     #[test]
-    fn reads_the_charging_reading() {
-        let s = parse_power_report(ON_PUCK).expect("rapport valide");
+    fn charging_is_detected_while_actually_charging() {
+        let s = parse_power_report(CHARGING).expect("rapport valide");
+        assert_eq!(s.percent, 96);
+        assert_eq!(s.voltage_mv, Some(4159));
+        assert!(s.charging, "une charge en cours doit être signalée");
+        assert!(!s.full, "96 % n'est pas une batterie pleine");
+    }
+
+    #[test]
+    fn a_full_battery_on_power_is_reported_as_charged() {
+        let s = parse_power_report(FULL_ON_PUCK).expect("rapport valide");
         assert_eq!(s.percent, 100);
-        assert_eq!(s.voltage_mv, Some(4143));
-        assert!(s.charging, "l'octet d'état 0x04 signale la charge");
+        assert!(s.charging, "posée sur son socle, elle reste alimentée");
+        assert!(s.full, "courant nul à 100 % : la charge est terminée");
+    }
+
+    #[test]
+    fn the_three_power_states_are_distinguished() {
+        let off = parse_power_report(OFF_PUCK).unwrap();
+        let charging = parse_power_report(CHARGING).unwrap();
+        let full = parse_power_report(FULL_ON_PUCK).unwrap();
+        assert_eq!((off.charging, off.full), (false, false));
+        assert_eq!((charging.charging, charging.full), (true, false));
+        assert_eq!((full.charging, full.full), (true, true));
     }
 
     #[test]
@@ -339,15 +393,15 @@ mod tests {
 
     #[test]
     fn truncated_reports_are_rejected_without_panicking() {
-        for n in 0..ON_BATTERY.len() {
-            assert!(parse_power_report(&ON_BATTERY[..n]).is_none(), "accepté à {n} octets");
+        for n in 0..OFF_PUCK.len() {
+            assert!(parse_power_report(&OFF_PUCK[..n]).is_none(), "accepté à {n} octets");
         }
         assert!(parse_power_report(&[]).is_none());
     }
 
     #[test]
     fn an_impossible_percentage_is_refused() {
-        let mut bad = ON_BATTERY.to_vec();
+        let mut bad = OFF_PUCK.to_vec();
         bad[2] = 101;
         assert!(parse_power_report(&bad).is_none());
         bad[2] = 255;
@@ -356,7 +410,7 @@ mod tests {
 
     #[test]
     fn an_absurd_voltage_is_dropped_but_the_level_is_kept() {
-        let mut odd = ON_BATTERY.to_vec();
+        let mut odd = OFF_PUCK.to_vec();
         odd[3] = 0x00;
         odd[4] = 0x00;
         let s = parse_power_report(&odd).expect("le niveau reste lisible");
@@ -365,24 +419,33 @@ mod tests {
     }
 
     #[test]
-    fn only_the_documented_state_means_charging() {
+    fn charging_rests_on_the_measured_supply_not_on_the_state_byte_alone() {
+        // L'octet d'état a déjà menti une fois : 0x04 voulait dire « chargée »
+        // et non « en charge ». La détection s'appuie donc d'abord sur la
+        // tension d'alimentation, qui est une mesure et non un code.
         for state in 0u8..=255 {
-            let mut r = ON_BATTERY.to_vec();
+            let mut r = CHARGING.to_vec();
             r[1] = state;
-            let s = parse_power_report(&r).unwrap();
+            assert!(
+                parse_power_report(&r).unwrap().charging,
+                "alimentation présente ignorée pour l'état {state:#04X}"
+            );
+
+            let mut unplugged = OFF_PUCK.to_vec();
+            unplugged[1] = state;
+            let s = parse_power_report(&unplugged).unwrap();
             assert_eq!(
                 s.charging,
-                state == STATE_CHARGING,
-                "état {state:#04X} mal interprété"
+                matches!(state, STATE_CHARGING | STATE_CHARGED),
+                "sans alimentation mesurée, seul l'état peut trancher ({state:#04X})"
             );
         }
-        assert!(!parse_power_report(ON_BATTERY).unwrap().charging);
     }
 
     #[test]
     fn extra_trailing_bytes_are_tolerated() {
         // hidapi rend parfois un tampon plus long que le rapport déclaré.
-        let mut padded = ON_BATTERY.to_vec();
+        let mut padded = OFF_PUCK.to_vec();
         padded.extend_from_slice(&[0xB6, 0x7A, 0xFE, 0x00, 0x00]);
         assert_eq!(parse_power_report(&padded).unwrap().percent, 94);
     }

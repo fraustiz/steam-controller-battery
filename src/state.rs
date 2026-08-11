@@ -89,10 +89,12 @@ impl App {
     pub fn tooltip(&self) -> String {
         let text = match (&self.last_good, &self.last_error) {
             (Some(s), _) => {
-                let mut t = if s.charging {
-                    format!("Manette Steam — {} %, en charge", s.percent)
-                } else {
-                    format!("Manette Steam — {} %", s.percent)
+                let mut t = match (s.charging, s.full) {
+                    // Rester sur « en charge » à cent pour cent, indéfiniment,
+                    // laisserait croire que la manette n'en finit pas.
+                    (true, true) => format!("Manette Steam — {} %, chargée", s.percent),
+                    (true, false) => format!("Manette Steam — {} %, en charge", s.percent),
+                    _ => format!("Manette Steam — {} %", s.percent),
                 };
                 if let Some(mv) = s.voltage_mv {
                     t.push_str(&format!(" ({},{:02} V)", mv / 1000, (mv % 1000) / 10));
@@ -111,11 +113,11 @@ mod tests {
     use super::*;
 
     fn at(percent: u8) -> Result<BatteryStatus, ProbeError> {
-        Ok(BatteryStatus { percent, voltage_mv: None, charging: false })
+        Ok(BatteryStatus { percent, voltage_mv: None, charging: false, full: false })
     }
 
     fn charging_at(percent: u8) -> Result<BatteryStatus, ProbeError> {
-        Ok(BatteryStatus { percent, voltage_mv: None, charging: true })
+        Ok(BatteryStatus { percent, voltage_mv: None, charging: true, full: false })
     }
 
     #[test]
@@ -198,7 +200,7 @@ mod tests {
     #[test]
     fn tooltip_shows_voltage_when_available() {
         let mut app = App::new();
-        app.ingest(Ok(BatteryStatus { percent: 80, voltage_mv: Some(4000), charging: false }));
+        app.ingest(Ok(BatteryStatus { percent: 80, voltage_mv: Some(4000), charging: false, full: false }));
         let t = app.tooltip();
         assert!(t.contains("80 %"), "{t}");
         assert!(t.contains("4,00 V"), "{t}");
@@ -208,6 +210,20 @@ mod tests {
     fn tooltip_marks_charging() {
         let mut app = App::new();
         app.ingest(charging_at(55));
-        assert!(app.tooltip().contains("en charge"));
+        assert!(app.tooltip().contains("en charge"), "{}", app.tooltip());
+    }
+
+    #[test]
+    fn tooltip_says_charged_once_the_current_stops() {
+        let mut app = App::new();
+        app.ingest(Ok(BatteryStatus {
+            percent: 100,
+            voltage_mv: Some(4200),
+            charging: true,
+            full: true,
+        }));
+        let t = app.tooltip();
+        assert!(t.contains("chargée"), "{t}");
+        assert!(!t.contains("en charge"), "une batterie pleine ne charge plus : {t}");
     }
 }

@@ -380,7 +380,7 @@ mod tests {
     use super::*;
 
     fn at(percent: u8, charging: bool) -> BatteryStatus {
-        BatteryStatus { percent, voltage_mv: None, charging }
+        BatteryStatus { percent, voltage_mv: None, charging, full: false }
     }
 
     fn buffer(size: u32, status: Option<&BatteryStatus>) -> Vec<u32> {

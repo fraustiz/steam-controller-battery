@@ -91,17 +91,36 @@ Les rapports d'entrée sont numérotés. Deux comptent :
 Le rapport `0x43` fait quinze octets :
 
 ```text
-[0] 0x43        identifiant du rapport
-[1] état        0x01 sur batterie, 0x04 en charge
-[2] pourcentage 0 à 100
-[3] tension     16 bits petit-boutiste, en millivolts
-[5] ...         seconde tension, rôle non établi
+[0] 0x43         identifiant du rapport
+[1] état         0x01 décharge, 0x02 en charge, 0x04 chargée
+[2] pourcentage  0 à 100
+[3] tension      cellule, 16 bits petit-boutiste, en millivolts
+[5] tension      seconde valeur, rôle non établi
+[7] alimentation 16 bits petit-boutiste, en millivolts ; nulle hors secteur
+[9] courant      16 bits petit-boutiste, en milliampères ; nul à pleine charge
 ```
 
-Le format a été établi en confrontant des relevés à des états connus. Sur le
-puck en charge, l'octet [2] valait `100` et l'octet [1] valait `0x04`. Hors du
-puck, [2] est tombé à `94` — exactement la valeur rapportée par ailleurs — et
-[1] à `0x01`.
+Les trois états, relevés sur le matériel :
+
+| Situation | [1] | [7..9] | [9..11] |
+|---|---|---|---|
+| Hors du puck, 94 % | `0x01` | 0 | 0 |
+| En charge, 96 % | `0x02` | 4800 mV | 175 mA |
+| Sur le puck, 100 % | `0x04` | 4860 mV | 0 mA |
+
+### L'octet d'état a menti une fois
+
+L'octet [1] a d'abord été lu de travers. Un unique relevé sur le puck le
+montrait à `0x04`, d'où la conclusion « `0x04` signifie en charge ». La
+batterie y était en réalité déjà pleine : `0x04` veut dire *chargée*, et c'est
+`0x02` qui signale une charge en cours. L'indicateur ne s'allumait donc jamais,
+et rien dans les tests ne pouvait le révéler — ils rejouaient fidèlement le
+relevé mal interprété.
+
+C'est de là que vient le choix de ne pas faire reposer la détection sur le seul
+octet d'état. Les octets [7] et [9] sont des mesures — tension d'alimentation
+et courant de charge — et une mesure ment moins qu'un code dont on n'a pas
+observé toutes les valeurs.
 
 ### Fausses pistes, pour mémoire
 
