@@ -23,6 +23,7 @@
 mod autostart;
 mod hid;
 mod icon;
+mod settings;
 mod state;
 mod tray;
 
@@ -46,7 +47,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use hid::{BatteryStatus, ProbeError};
 use state::{App, IconState};
-use tray::{Tray, ID_CHIME, ID_QUIT, ID_TOGGLE_AUTOSTART, WM_TRAY};
+use tray::{Tray, ID_CHIME, ID_QUIT, ID_TOGGLE_AUTOSTART, ID_TOGGLE_PERCENT, WM_TRAY};
 
 /// Relance de la lecture après un changement de périphérique, le temps que
 /// Windows termine son énumération.
@@ -72,9 +73,10 @@ static READER_STOP: AtomicBool = AtomicBool::new(false);
 struct Ctx {
     app: App,
     tray: Tray,
-    /// Dernier état effectivement dessiné. Tant qu'il ne change pas, il est
-    /// inutile de reconstruire une icône.
-    drawn: Option<IconState>,
+    /// Dernier dessin produit : l'état, et le fait d'y avoir inscrit le
+    /// pourcentage. Tant que les deux ne changent pas, il est inutile de
+    /// reconstruire une icône.
+    drawn: Option<(IconState, bool)>,
 }
 
 thread_local! {
@@ -95,9 +97,10 @@ fn icon_size(hwnd: HWND) -> u32 {
 /// Reconstruit l'icône, que son apparence ait changé ou non.
 fn repaint(hwnd: HWND, ctx: &mut Ctx) {
     let state = ctx.app.icon_state();
-    let hicon = icon::render(state, icon_size(hwnd));
+    let with_percent = settings::show_percent();
+    let hicon = icon::render(state, icon_size(hwnd), with_percent);
     ctx.tray.set(hicon, &ctx.app.tooltip());
-    ctx.drawn = Some(state);
+    ctx.drawn = Some((state, with_percent));
 }
 
 /// Démarre le fil de lecture s'il n'y en a pas déjà un.
@@ -137,7 +140,7 @@ fn on_status(hwnd: HWND) {
         // L'infobulle suit chaque relevé ; l'icône, seulement les changements
         // visibles. Sans cette distinction on reconstruirait une icône toutes
         // les trois secondes et demie pour rien.
-        if ctx.drawn != Some(ctx.app.icon_state()) {
+        if ctx.drawn != Some((ctx.app.icon_state(), settings::show_percent())) {
             repaint(hwnd, ctx);
         } else {
             let tip = ctx.app.tooltip();
@@ -190,10 +193,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                             .as_ref()
                             .is_some_and(|ctx| matches!(ctx.app.icon_state(), IconState::Battery(_)))
                     });
-                    let choice = tray::popup_menu(hwnd, on, awake);
+                    let percent_on = settings::show_percent();
+                    let choice = tray::popup_menu(hwnd, on, awake, percent_on);
                     match choice {
                         ID_TOGGLE_AUTOSTART => {
                             autostart::set_enabled(!on);
+                        }
+                        ID_TOGGLE_PERCENT => {
+                            settings::set_show_percent(!percent_on);
+                            // Redessin immédiat : l'utilisateur vient de le
+                            // demander, il ne doit pas attendre le prochain relevé.
+                            CTX.with(|c| {
+                                if let Ok(mut b) = c.try_borrow_mut() {
+                                    if let Some(ctx) = b.as_mut() {
+                                        repaint(hwnd, ctx);
+                                    }
+                                }
+                            });
                         }
                         ID_CHIME => {
                             // Le carillon dure deux secondes : il n'a rien à

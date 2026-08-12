@@ -19,6 +19,7 @@ pub const WM_TRAY: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 1
 pub const ID_TOGGLE_AUTOSTART: u32 = 1;
 pub const ID_QUIT: u32 = 2;
 pub const ID_CHIME: u32 = 3;
+pub const ID_TOGGLE_PERCENT: u32 = 4;
 
 fn wide(s: &str) -> Vec<u16> {
     std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
@@ -116,7 +117,7 @@ impl Tray {
 /// arrêt immédiat du processus puisque le profil release abandonne au lieu de
 /// dérouler la pile. Ne rien avoir à emprunter supprime le problème à la
 /// racine plutôt que de le rendre improbable.
-pub fn popup_menu(hwnd: HWND, autostart_on: bool, can_chime: bool) -> u32 {
+pub fn popup_menu(hwnd: HWND, autostart_on: bool, can_chime: bool, percent_on: bool) -> u32 {
     unsafe {
         let menu = CreatePopupMenu();
         if menu.is_null() {
@@ -130,10 +131,15 @@ pub fn popup_menu(hwnd: HWND, autostart_on: bool, can_chime: bool) -> u32 {
         );
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
 
-        let check = if autostart_on { MF_CHECKED } else { MF_UNCHECKED };
         AppendMenuW(
             menu,
-            MF_STRING | check,
+            MF_STRING | if percent_on { MF_CHECKED } else { MF_UNCHECKED },
+            ID_TOGGLE_PERCENT as usize,
+            wide("Afficher le pourcentage").as_ptr(),
+        );
+        AppendMenuW(
+            menu,
+            MF_STRING | if autostart_on { MF_CHECKED } else { MF_UNCHECKED },
             ID_TOGGLE_AUTOSTART as usize,
             wide("Démarrer avec Windows").as_ptr(),
         );
