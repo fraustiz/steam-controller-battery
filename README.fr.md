@@ -14,6 +14,13 @@ là.
 Rust natif, deux dépendances : `hidapi` pour dialoguer avec la manette,
 `windows-sys` pour Win32. Aucun framework graphique.
 
+## Se le procurer
+
+Récupérer `sc-battery.exe` depuis la
+[dernière release](https://github.com/fraustiz/steam-controller-battery/releases/latest)
+et le lancer. Rien à installer : il ne dépend que des DLL système, donc il se
+copie où l'on veut.
+
 ## Ce que dit l'icône
 
 | Situation | Icône |
@@ -94,9 +101,10 @@ ordonnancé du tout.
 |---|---|---|
 | Rien de branché | Rien. Le fil de lecture s'est terminé. | Zéro réveil |
 | Dongle branché, manette éteinte | Une tentative toutes les 5 s | négligeable |
-| Manette connectée | Un fil à l'écoute du flux | 0,31 % d'un cœur |
+| Manette connectée | Un fil à l'écoute du flux | 0,29 % d'un cœur |
 
-La mémoire privée tient autour de 2,2 Mo ; les 12 Mo affichés par le
+Mesuré sur deux minutes, manette connectée — le pire cas : 344 ms de
+processeur, 2,05 Mo de mémoire privée, trois fils. Les 11,6 Mo affichés par le
 gestionnaire des tâches comptent les DLL système partagées avec le reste de la
 machine.
 
@@ -123,7 +131,7 @@ Le prix en est de traverser le flux d'entrée à 270 Hz qui arrive sur la même
 interface. Traverser n'est pas traiter : chaque rapport coûte une comparaison
 d'octet, et le noyau les reçoit de toute façon, que nous les lisions ou non.
 
-Ce prix a été mesuré : **0,31 % d'un cœur**, contre 0,035 % pour un sondage
+Ce prix a été mesuré : **0,29 % d'un cœur**, contre 0,035 % pour un sondage
 périodique. Neuf fois plus, pour passer d'une demi-minute à quelques secondes de
 latence. En valeur absolue cela reste 0,3 % d'un seul cœur, et uniquement tant
 qu'une manette est connectée — mais c'est un arbitrage, pas un repas gratuit.
@@ -259,7 +267,9 @@ cargo test -- --ignored    # vérifications sur manette réelle, et planche des 
 
 ## Crédits et licences
 
-Ce projet est sous licence MIT. Il incorpore des travaux tiers :
+Le code est sous licence MIT (`LICENSE`). Deux composants viennent d'ailleurs et
+gardent leurs propres termes, détaillés dans
+[THIRD-PARTY.md](THIRD-PARTY.md) :
 
 - **Les formes des icônes** dérivent de
   [Material Symbols](https://fonts.google.com/icons) de Google, sous licence

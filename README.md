@@ -13,6 +13,13 @@ that costs nothing at all when the controller is away.
 Native Rust, two dependencies: `hidapi` to talk to the controller, `windows-sys`
 for Win32. No GUI framework.
 
+## Getting it
+
+Grab `sc-battery.exe` from the
+[latest release](https://github.com/fraustiz/steam-controller-battery/releases/latest)
+and run it. Nothing to install: it depends only on system DLLs, so it can be
+copied anywhere.
+
 ## What the icon says
 
 | Situation | Icon |
@@ -90,10 +97,11 @@ all.
 |---|---|---|
 | Nothing plugged in | Nothing. The reading thread has ended. | Zero wakeups |
 | Dongle plugged, controller off | One attempt every 5 s | negligible |
-| Controller connected | One thread listening to the stream | 0.31 % of one core |
+| Controller connected | One thread listening to the stream | 0.29 % of one core |
 
-Private memory stays around 2.2 MB; the 12 MB the task manager shows count
-system DLLs shared with the rest of the machine.
+Measured over two minutes with a controller connected — the worst case:
+344 ms of CPU, 2.05 MB of private memory, three threads. The 11.6 MB the task
+manager shows count system DLLs shared with the rest of the machine.
 
 Returning to the dormant state is driven by `WM_DEVICECHANGE`, which Windows
 broadcasts to every top-level window — no subscription to maintain.
@@ -117,7 +125,7 @@ The price is traversing the 270 Hz input stream that arrives on the same
 interface. Traversing is not processing — each report costs one byte comparison,
 and the kernel receives them anyway, whether we read them or not.
 
-That price was measured: **0.31 % of one core**, against 0.035 % for periodic
+That price was measured: **0.29 % of one core**, against 0.035 % for periodic
 polling. Nine times more, to go from half a minute to a few seconds of latency.
 In absolute terms it is still 0.3 % of a single core, and only while a
 controller is connected — but it is a trade, not a free lunch.
@@ -251,10 +259,12 @@ cargo test -- --ignored    # real-controller checks, and the icon contact sheet
 
 ## Credits and licences
 
-This project is under the MIT licence. It incorporates third-party work:
+The code is under the MIT licence (`LICENSE`). Two components come from
+elsewhere and keep their own terms, both detailed in
+[THIRD-PARTY.md](THIRD-PARTY.md):
 
 - **Icon shapes** derive from [Material Symbols](https://fonts.google.com/icons)
-  by Google, under the Apache 2.0 licence.
+  by Google, under Apache 2.0.
 - **The haptic frequency tables** come from
   [SteamHapticsSinger](https://github.com/CrazyCritic89/SteamHapticsSinger) by
   CrazyCritic89, after SteamControllerSinger by Pila, under BSD-3-Clause — by way
