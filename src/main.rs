@@ -24,6 +24,7 @@ mod autostart;
 mod debug;
 mod hid;
 mod icon;
+mod i18n;
 mod icons;
 mod settings;
 mod state;
@@ -117,7 +118,7 @@ fn repaint(hwnd: HWND, ctx: &mut Ctx) {
 fn tooltip(ctx: &Ctx) -> String {
     let t = ctx.app.tooltip();
     if debug::enabled() {
-        format!("{}{t}", debug::TOOLTIP_PREFIX)
+        format!("{}{t}", debug::tooltip_prefix())
     } else {
         t
     }

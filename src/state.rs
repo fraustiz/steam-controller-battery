@@ -103,10 +103,11 @@ impl App {
                 self.fired[i] = true;
                 // Les seuils sont ordonnés du plus haut au plus bas ; le
                 // dernier franchi est le plus urgent, il l'emporte.
+                let t = crate::i18n::t();
                 alert = Some(Alert {
                     level,
-                    title: "Batterie de la manette faible".into(),
-                    body: format!("Il reste {} % de charge.", s.percent),
+                    title: t.low_title.into(),
+                    body: (t.low_body)(s.percent),
                 });
             }
         }
@@ -117,20 +118,22 @@ impl App {
     pub fn tooltip(&self) -> String {
         let text = match (&self.last_good, &self.last_error) {
             (Some(s), _) => {
+                let w = crate::i18n::t();
+                let level = (w.percent_of)(s.percent);
+                // Rester sur « en charge » à cent pour cent, indéfiniment,
+                // laisserait croire que la manette n'en finit pas.
                 let mut t = match (s.charging, s.full) {
-                    // Rester sur « en charge » à cent pour cent, indéfiniment,
-                    // laisserait croire que la manette n'en finit pas.
-                    (true, true) => format!("Manette Steam — {} %, chargée", s.percent),
-                    (true, false) => format!("Manette Steam — {} %, en charge", s.percent),
-                    _ => format!("Manette Steam — {} %", s.percent),
+                    (true, true) => format!("{} — {level}, {}", w.controller, w.charged),
+                    (true, false) => format!("{} — {level}, {}", w.controller, w.charging),
+                    _ => format!("{} — {level}", w.controller),
                 };
                 if let Some(mv) = s.voltage_mv {
-                    t.push_str(&format!(" ({},{:02} V)", mv / 1000, (mv % 1000) / 10));
+                    t.push_str(&(w.volts)(mv));
                 }
                 t
             }
             (None, Some(e)) => e.tooltip(),
-            (None, None) => "Manette Steam — lecture en cours".into(),
+            (None, None) => crate::i18n::t().reading.into(),
         };
         text.chars().take(127).collect()
     }
@@ -214,7 +217,7 @@ mod tests {
         assert_eq!(app.icon_state(), IconState::Docked);
         // Le pourcentage d'avant ne vaut plus rien : elle charge sans nous le dire.
         assert!(app.display().is_none());
-        assert!(app.tooltip().contains("socle"), "{}", app.tooltip());
+        assert_eq!(app.tooltip(), crate::i18n::t().controller_docked);
     }
 
     #[test]
@@ -232,7 +235,7 @@ mod tests {
         app.ingest(at(42));
         app.ingest(Err(ProbeError::NoDevice));
         assert!(app.display().is_none());
-        assert!(app.tooltip().contains("dongle"), "{}", app.tooltip());
+        assert_eq!(app.tooltip(), crate::i18n::t().no_dongle);
     }
 
     #[test]
@@ -256,16 +259,17 @@ mod tests {
     fn tooltip_shows_voltage_when_available() {
         let mut app = App::new();
         app.ingest(Ok(BatteryStatus { percent: 80, voltage_mv: Some(4000), charging: false, full: false }));
-        let t = app.tooltip();
-        assert!(t.contains("80 %"), "{t}");
-        assert!(t.contains("4,00 V"), "{t}");
+        let tip = app.tooltip();
+        let w = crate::i18n::t();
+        assert!(tip.contains(&(w.percent_of)(80)), "{tip}");
+        assert!(tip.contains(&(w.volts)(4000)), "{tip}");
     }
 
     #[test]
     fn tooltip_marks_charging() {
         let mut app = App::new();
         app.ingest(charging_at(55));
-        assert!(app.tooltip().contains("en charge"), "{}", app.tooltip());
+        assert!(app.tooltip().contains(crate::i18n::t().charging), "{}", app.tooltip());
     }
 
     #[test]
@@ -277,8 +281,9 @@ mod tests {
             charging: true,
             full: true,
         }));
-        let t = app.tooltip();
-        assert!(t.contains("chargée"), "{t}");
-        assert!(!t.contains("en charge"), "une batterie pleine ne charge plus : {t}");
+        let tip = app.tooltip();
+        let w = crate::i18n::t();
+        assert!(tip.contains(w.charged), "{tip}");
+        assert!(!tip.contains(w.charging), "une batterie pleine ne charge plus : {tip}");
     }
 }

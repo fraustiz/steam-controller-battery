@@ -144,6 +144,7 @@ pub fn popup_menu(
     percent_on: bool,
     sim: Option<SimMenu>,
 ) -> u32 {
+    let t = crate::i18n::t();
     unsafe {
         let menu = CreatePopupMenu();
         if menu.is_null() {
@@ -153,7 +154,7 @@ pub fn popup_menu(
             menu,
             MF_STRING | if can_chime { MF_ENABLED } else { MF_GRAYED },
             ID_CHIME as usize,
-            wide("Faire sonner la manette").as_ptr(),
+            wide(t.chime).as_ptr(),
         );
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
 
@@ -161,13 +162,13 @@ pub fn popup_menu(
             menu,
             MF_STRING | if percent_on { MF_CHECKED } else { MF_UNCHECKED },
             ID_TOGGLE_PERCENT as usize,
-            wide("Afficher le pourcentage").as_ptr(),
+            wide(t.show_percent).as_ptr(),
         );
         AppendMenuW(
             menu,
             MF_STRING | if autostart_on { MF_CHECKED } else { MF_UNCHECKED },
             ID_TOGGLE_AUTOSTART as usize,
-            wide("Démarrer avec Windows").as_ptr(),
+            wide(t.autostart).as_ptr(),
         );
         // Simulation : n'existe que si le paramètre de lancement est là.
         if let Some(sim) = sim {
@@ -180,32 +181,32 @@ pub fn popup_menu(
                     levels,
                     MF_STRING | mark,
                     (ID_SIM_LEVEL_BASE + step as u32) as usize,
-                    wide(&format!("{step} %")).as_ptr(),
+                    wide(&(t.percent_of)(step)).as_ptr(),
                 );
             }
             AppendMenuW(levels, MF_SEPARATOR, 0, std::ptr::null());
-            AppendMenuW(levels, MF_STRING, ID_SIM_MINUS as usize, wide("Un point de moins").as_ptr());
-            AppendMenuW(levels, MF_STRING, ID_SIM_PLUS as usize, wide("Un point de plus").as_ptr());
+            AppendMenuW(levels, MF_STRING, ID_SIM_MINUS as usize, wide(t.sim_minus).as_ptr());
+            AppendMenuW(levels, MF_STRING, ID_SIM_PLUS as usize, wide(t.sim_plus).as_ptr());
             AppendMenuW(
                 menu,
                 MF_STRING | MF_POPUP,
                 levels as usize,
-                wide(&format!("Simuler le niveau  ({} %)", sim.percent)).as_ptr(),
+                wide(&(t.sim_level)(sim.percent)).as_ptr(),
             );
 
             let flag = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
             AppendMenuW(menu, MF_STRING | flag(sim.charging), ID_SIM_CHARGING as usize,
-                wide("Simuler la charge").as_ptr());
+                wide(t.sim_charging).as_ptr());
             AppendMenuW(menu, MF_STRING | flag(sim.connected), ID_SIM_CONNECTED as usize,
-                wide("Simuler : connectée").as_ptr());
+                wide(t.sim_connected).as_ptr());
             AppendMenuW(menu, MF_STRING | flag(sim.docked), ID_SIM_DOCKED as usize,
-                wide("Simuler : éteinte sur le socle").as_ptr());
+                wide(t.sim_docked).as_ptr());
             AppendMenuW(menu, MF_STRING | flag(!sim.connected && !sim.docked),
-                ID_SIM_DISCONNECTED as usize, wide("Simuler : rien de connecté").as_ptr());
+                ID_SIM_DISCONNECTED as usize, wide(t.sim_disconnected).as_ptr());
         }
 
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        AppendMenuW(menu, MF_STRING, ID_QUIT as usize, wide("Quitter").as_ptr());
+        AppendMenuW(menu, MF_STRING, ID_QUIT as usize, wide(t.quit).as_ptr());
 
         let mut pt = POINT { x: 0, y: 0 };
         GetCursorPos(&mut pt);

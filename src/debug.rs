@@ -83,7 +83,9 @@ pub fn reading() -> Result<BatteryStatus, ProbeError> {
 /// Mention ajoutée à l'infobulle. Sans elle, on finirait par prendre une
 /// valeur inventée pour une mesure — exactement l'erreur que ce mode est censé
 /// aider à débusquer.
-pub const TOOLTIP_PREFIX: &str = "[simulation] ";
+pub fn tooltip_prefix() -> &'static str {
+    crate::i18n::t().sim_prefix
+}
 
 #[cfg(test)]
 mod tests {

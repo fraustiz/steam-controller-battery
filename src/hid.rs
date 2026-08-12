@@ -123,12 +123,13 @@ pub enum ProbeError {
 impl ProbeError {
     /// Texte destiné à l'infobulle de la zone de notification.
     pub fn tooltip(&self) -> String {
+        let t = crate::i18n::t();
         match self {
-            Self::NoDevice => "Aucun dongle Steam détecté".into(),
-            Self::ControllerOffline => "Manette éteinte ou hors de portée".into(),
-            Self::ControllerDocked => "Manette éteinte sur son socle — niveau inconnu".into(),
-            Self::Busy(_) => "Manette occupée par un autre logiciel".into(),
-            Self::HidUnavailable(e) => format!("Accès HID impossible : {e}"),
+            Self::NoDevice => t.no_dongle.into(),
+            Self::ControllerOffline => t.controller_offline.into(),
+            Self::ControllerDocked => t.controller_docked.into(),
+            Self::Busy(_) => t.controller_busy.into(),
+            Self::HidUnavailable(e) => (t.hid_unavailable)(e),
         }
     }
 }
@@ -721,7 +722,12 @@ mod tests {
             ProbeError::ControllerDocked.tooltip(),
             ProbeError::ControllerOffline.tooltip()
         );
-        assert!(ProbeError::ControllerDocked.tooltip().contains("socle"));
+        // Comparé aux libellés de la langue en cours plutôt qu'à un texte
+        // français figé : le test doit tenir quelle que soit la locale.
+        assert_eq!(
+            ProbeError::ControllerDocked.tooltip(),
+            crate::i18n::t().controller_docked
+        );
     }
 
     /// Fait réellement sonner la manette. À lancer manette allumée :

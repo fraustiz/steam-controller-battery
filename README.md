@@ -1,260 +1,258 @@
-# Batterie de la Steam Controller 2026
+# Steam Controller 2026 battery
 
-Le niveau de batterie de la manette, en permanence, dans la zone de
-notification de Windows. Un binaire de 187 Ko, sans runtime, sans installateur,
-et qui ne consomme rien quand la manette n'est pas là.
+*[Version française](README.fr.md)*
 
-## Utilisation
+The battery level of the Steam Controller 2026, permanently, in the Windows
+notification area. A single binary of about 250 KB — no runtime, no installer —
+that costs nothing at all when the controller is away.
 
-Lancer `sc-battery.exe`. Une batterie verticale apparaît dans la zone de
-notification : le remplissage suit le niveau, du vert au rouge en passant par
-l'ambre. Le contour prend le ton qui contraste avec la barre des tâches, clair
-ou sombre, et suit vos changements de thème.
+Native Rust, two dependencies: `hidapi` to talk to the controller, `windows-sys`
+for Win32. No GUI framework.
 
-L'icône a trois visages :
+## What the icon says
 
-| Situation | Icône |
+| Situation | Icon |
 |---|---|
-| Manette connectée | Batterie remplie et colorée selon le niveau, éclair si elle charge |
-| Éteinte **sur son socle** | Batterie atténuée avec éclair : en charge, niveau inconnu |
-| Rien de connecté | Une prise |
+| Controller connected | Battery filled and coloured by level, one of eight steps |
+| Charging | The same level, plus a bolt |
+| **Off on its dock** | A frame marked with a question mark |
+| Nothing connected | A crossed-out plug |
 
-Une batterie vide se lirait « 0 % » : c'est pourquoi l'absence de mesure ne se
-dessine jamais ainsi. Et l'état « sur le socle » est atténué plutôt que plein,
-faute de quoi il serait le dessin exact d'une batterie mesurée à 0 % en charge
-— état parfaitement réel, qu'une manette à plat sur son socle produit.
+The dock state deserves its own icon because the level is genuinely unknown
+there: a powered-off controller emits nothing. Drawing an empty battery would
+read as "0 %", which is a different claim entirely.
 
-Le clic droit propose **« Afficher le pourcentage »**. Le nombre remplace alors
-entièrement la batterie, et prend sa couleur du niveau.
+- **Hover** — level, cell voltage, charge state.
+- **Left click** — restarts reading if it had stopped for want of hardware.
+- **Right click** — the menu below.
 
-Ce remplacement n'est pas un choix esthétique mais une contrainte de place. Une
-première version inscrivait le chiffre *dans* la batterie : le contour ne
-laissait que huit pixels utiles, donc des chiffres de 3×5, à la limite du
-déchiffrable. Sans cadre, les mêmes chiffres occupent 6×10 — quatre fois la
-surface. Le niveau reste lisible d'un coup d'œil puisqu'il donne sa couleur au
-nombre, et la charge passe dans l'infobulle.
+A balloon warns at 20 % and again at 10 %, once per discharge.
 
-Les chiffres sont une police bitmap dessinée à la main, alignée au pixel :
-confiés à GDI, ils s'étaleraient sur deux pixels gris et redeviendraient
-illisibles.
+## Menu
 
-Le clic droit propose aussi **« Faire sonner la manette »** : une sonnerie jouée sur
-ses actionneurs haptiques, pour la retrouver ou savoir de laquelle il s'agit.
-L'entrée est grisée quand la manette est éteinte, ses actionneurs ne recevant
-alors rien.
+**Ring the controller** plays a short tune on the haptic actuators, to find it
+in a room or to tell which one it is. The entry is greyed out while the
+controller is off — its actuators receive nothing then.
 
-La mélodie vient d'un fichier MIDI, converti **hors ligne** en table figée par
-un petit outil séparé. Embarquer un analyseur MIDI pour rejouer une seconde et
-demie de musique aurait coûté une dépendance entière contre quelques centaines
-d'octets de table. Le principe et les tables de fréquences viennent de
-[shs-studio](https://github.com/fraustiz/steam-haptics-studio), lui-même porté
-de SteamHapticsSinger.
+The melody comes from a MIDI file, converted **offline** into a frozen table by
+a separate tool. Embedding a MIDI parser to replay a second and a half of music
+would have cost a whole dependency against a few hundred bytes of table.
 
-- **Survol** — pourcentage, tension, état de charge.
-- **Clic gauche** — relance la lecture si elle s'était arrêtée faute de matériel.
-- **Clic droit** — démarrage automatique avec Windows, et quitter.
+**Show the percentage** replaces the battery with the number itself, coloured by
+level. That replacement is a constraint, not a preference: inside a battery
+frame, 16 pixels leave room for 3×5 digits, which are barely decipherable.
+Without the frame the same digits occupy 6×10 — four times the area. The digits
+are a hand-drawn bitmap font; handed to GDI they would spread over two grey
+pixels and become unreadable again.
 
-Une notification arrive à 20 % puis à 10 %, une seule fois par décharge. Un
-éclair se découpe dans l'icône pendant la charge.
+**Start with Windows** writes a value under the current user's `Run` key.
+Nothing more — no service, no scheduled task, no elevation.
 
-Le pourcentage exact ne figure pas dans l'icône : à seize pixels, trois
-chiffres sont illisibles et alourdissent la barre. Il est dans l'infobulle.
+## Language
 
-## Mode de simulation
+English and French. The system locale decides, English being the fallback.
+
+```bash
+sc-battery.exe --lang fr
+```
+
+forces the language for that run.
+
+## Simulation mode
 
 ```bash
 sc-battery.exe --debug
 ```
 
-Le menu contextuel reçoit alors une section supplémentaire : niveau au choix,
-charge, socle, déconnexion. Le matériel n'est plus interrogé du tout — le fil
-de lecture écraserait les valeurs choisies.
+The menu then gains a level of your choosing, charging, dock and disconnection.
+The hardware is no longer queried at all — the reading thread would overwrite
+the chosen values.
 
-Il existe parce que certains états se méritent : une batterie à 8 % ne se
-provoque pas sur commande, et vérifier le rendu sur barre des tâches claire
-suppose de changer le thème du système.
+It exists because some states have to be earned: an 8 % battery does not happen
+on demand, and checking the rendering on a light taskbar means changing the
+system theme.
 
-L'infobulle est préfixée de `[simulation]`. Sans cette mention, on finirait par
-prendre une valeur inventée pour une mesure — l'erreur exacte que ce mode
-sert à débusquer.
+The tooltip is prefixed with `[simulated]`. Without that mention one ends up
+taking an invented value for a measurement — the very mistake this mode is meant
+to expose.
 
-## La consommation
+## Consumption
 
-C'est la contrainte qui a dicté toute l'architecture. Le processus est une
-fenêtre cachée bloquée dans `GetMessage` : tant que rien n'arrive, il n'est pas
-ordonnancé du tout.
+This is the constraint that shaped the architecture. The process is a hidden
+window blocked in `GetMessage`: while nothing happens, it is not scheduled at
+all.
 
-| Situation | Ce qui tourne | Coût |
+| Situation | What runs | Cost |
 |---|---|---|
-| Rien de branché | Rien. Le fil de lecture s'est terminé. | Zéro réveil |
-| Dongle branché, manette éteinte | Une tentative toutes les 5 s | négligeable |
-| Manette connectée | Un fil à l'écoute du flux | 0,31 % d'un cœur |
+| Nothing plugged in | Nothing. The reading thread has ended. | Zero wakeups |
+| Dongle plugged, controller off | One attempt every 5 s | negligible |
+| Controller connected | One thread listening to the stream | 0.31 % of one core |
 
-La mémoire privée tient en 2,2 Mo ; les 12 Mo affichés par le gestionnaire des
-tâches comptent les DLL système partagées avec le reste de la machine.
+Private memory stays around 2.2 MB; the 12 MB the task manager shows count
+system DLLs shared with the rest of the machine.
 
-Le retour à l'état dormant est déclenché par `WM_DEVICECHANGE`, que Windows
-diffuse à toute fenêtre de premier niveau — aucun abonnement à maintenir.
+Returning to the dormant state is driven by `WM_DEVICECHANGE`, which Windows
+broadcasts to every top-level window — no subscription to maintain.
 
-Une nuance assumée : tant que le dongle reste branché, le fil de lecture
-retente toutes les cinq secondes, même manette éteinte. Allumer une manette
-déjà appairée ne produit aucun événement de périphérique, puisque le dongle,
-lui, n'a pas bougé ; sans cette tentative répétée, on ne la verrait jamais
-revenir.
+One accepted nuance: while the dongle stays plugged in, the reading thread
+retries every five seconds even with the controller off. Turning on an already
+paired controller produces no device event, since the dongle itself has not
+moved; without that repeated attempt it would never be seen coming back.
 
-### Le compromis de la réactivité
+### The responsiveness trade-off
 
-La première version interrogeait la manette toutes les trente secondes. Poser
-la manette sur son socle mettait donc jusqu'à une demi-minute à se voir, ce qui
-est trop long pour un geste dont on attend un retour immédiat.
+The first version polled every thirty seconds. Putting the controller on its
+dock therefore took up to half a minute to show, which is too long for a gesture
+one expects immediate feedback from.
 
-Or la manette émet son état d'alimentation d'elle-même, toutes les trois
-secondes et demie. Un fil reste donc à l'écoute et transmet chaque rapport : la
-charge apparaît en quelques secondes, et plus aucun minuteur ne tourne.
+But the controller emits its power state by itself, every three and a half
+seconds. A thread now stays listening and forwards each report: charging appears
+within seconds, and no timer runs at all.
 
-Le prix en est de traverser le flux d'entrée à 270 Hz, qui arrive sur la même
-interface. Traverser ne veut pas dire traiter : chaque rapport coûte une
-comparaison d'octet, et le noyau les reçoit de toute façon, que nous les
-lisions ou non.
+The price is traversing the 270 Hz input stream that arrives on the same
+interface. Traversing is not processing — each report costs one byte comparison,
+and the kernel receives them anyway, whether we read them or not.
 
-Ce prix se mesure : **0,31 % d'un cœur**, contre 0,035 % pour le sondage
-périodique. Neuf fois plus, donc, pour passer d'une demi-minute à quelques
-secondes de latence. En valeur absolue cela reste 0,3 % d'un seul cœur, et
-uniquement tant qu'une manette est connectée — mais c'est un arbitrage, pas un
-repas gratuit. Qui préférerait l'inverse n'a qu'à remplacer l'écoute par un
-appel périodique à `probe()` : `run_reader` est la seule fonction concernée.
+That price was measured: **0.31 % of one core**, against 0.035 % for periodic
+polling. Nine times more, to go from half a minute to a few seconds of latency.
+In absolute terms it is still 0.3 % of a single core, and only while a
+controller is connected — but it is a trade, not a free lunch.
 
-L'infobulle suit chaque relevé, mais l'icône n'est reconstruite que lorsque son
-dessin change réellement — sans quoi on fabriquerait une icône toutes les trois
-secondes et demie pour un résultat identique.
+## The protocol
 
-## Le protocole
+None of this is documented by Valve; all of it was established by probing the
+hardware. The detail lives in the header of [`src/hid.rs`](src/hid.rs).
 
-Rien de tout cela n'est documenté par Valve ; l'ensemble a été établi en
-sondant le matériel. Le détail vit dans l'en-tête de [`src/hid.rs`](src/hid.rs).
+The dongle (PID `0x1304`) exposes several HID interfaces on `usage_page`
+`0xFF00`. The one with `usage` `0x0002` is the control interface; the others,
+`usage` `0x0001`, are the pairing slots — only one emits, the one where a
+controller is actually connected.
 
-Le dongle (PID `0x1304`) expose plusieurs interfaces HID en `usage_page`
-`0xFF00`. Celle d'`usage` `0x0002` est l'interface de contrôle ; les autres,
-d'`usage` `0x0001`, sont les emplacements d'appairage — une seule émet, celle
-où la manette est réellement connectée.
+Input reports are numbered. Two matter:
 
-Les rapports d'entrée sont numérotés. Deux comptent :
-
-| identifiant | débit | contenu |
+| id | rate | contents |
 |---|---|---|
-| `0x42` | ~270 Hz | boutons, axes, trackpads, gyroscope |
-| `0x43` | ~0,3 Hz | **état d'alimentation** |
+| `0x42` | ~270 Hz | buttons, axes, trackpads, gyroscope |
+| `0x43` | ~0.3 Hz | **power state** |
 
-Le rapport `0x43` fait quinze octets :
+Report `0x43` is fifteen bytes:
 
 ```text
-[0] 0x43         identifiant du rapport
-[1] état         0x01 décharge, 0x02 en charge, 0x04 chargée
-[2] pourcentage  0 à 100
-[3] tension      cellule, 16 bits petit-boutiste, en millivolts
-[5] tension      seconde valeur, rôle non établi
-[7] alimentation 16 bits petit-boutiste, en millivolts ; nulle hors secteur
-[9] courant      16 bits petit-boutiste, en milliampères ; nul à pleine charge
+[0] 0x43        report id
+[1] state       0x01 discharging, 0x02 charging, 0x04 charged
+[2] percentage  0 to 100
+[3] voltage     cell, 16-bit little-endian, millivolts
+[5] voltage     second value, role not established
+[7] supply      16-bit little-endian, millivolts; zero off mains
+[9] current     16-bit little-endian, milliamps; zero at full charge
 ```
 
-Les trois états, relevés sur le matériel :
+Three states, read off the hardware:
 
 | Situation | [1] | [7..9] | [9..11] |
 |---|---|---|---|
-| Hors du puck, 94 % | `0x01` | 0 | 0 |
-| En charge, 96 % | `0x02` | 4800 mV | 175 mA |
-| Sur le puck, 100 % | `0x04` | 4860 mV | 0 mA |
+| Off the dock, 94 % | `0x01` | 0 | 0 |
+| Charging, 96 % | `0x02` | 4800 mV | 175 mA |
+| On the dock, 100 % | `0x04` | 4860 mV | 0 mA |
 
-### L'octet d'état a menti une fois
+### Detecting a powered-off controller on its dock
 
-L'octet [1] a d'abord été lu de travers. Un unique relevé sur le puck le
-montrait à `0x04`, d'où la conclusion « `0x04` signifie en charge ». La
-batterie y était en réalité déjà pleine : `0x04` veut dire *chargée*, et c'est
-`0x02` qui signale une charge en cours. L'indicateur ne s'allumait donc jamais,
-et rien dans les tests ne pouvait le révéler — ils rejouaient fidèlement le
-relevé mal interprété.
+Channel `0x01` swaps interfaces depending on the controller's state, and that is
+what makes the detection possible:
 
-C'est de là que vient le choix de ne pas faire reposer la détection sur le seul
-octet d'état. Les octets [7] et [9] sont des mesures — tension d'alimentation
-et courant de charge — et une mesure ment moins qu'un code dont on n'a pas
-observé toutes les valeurs.
-
-### Détecter une manette éteinte sur son socle
-
-Le routage du canal `0x01` s'inverse selon l'état de la manette, et c'est ce qui
-rend la détection possible :
-
-| Manette | emplacement (`usage 0x0001`) | contrôle (`usage 0x0002`) |
+| Controller | slot (`usage 0x0001`) | control (`usage 0x0002`) |
 |---|---|---|
-| allumée | répond | refusé |
-| éteinte, **sur le socle** | refusé | **répond** |
-| éteinte, à côté du PC hors socle | refusé | refusé |
-| éteinte, éloignée | refusé | refusé |
+| on | answers | refused |
+| off, **on the dock** | refused | **answers** |
+| off, next to the PC but off the dock | refused | refused |
+| off, far away | refused | refused |
 
-Les deux derniers cas sont ce qui donne sa valeur au test. Une manette éteinte
-posée à trente centimètres du dongle reste muette : ce n'est donc ni un
-appairage mémorisé, ni de la portée radio. Seul le contact du socle — celui-là
-même qui la recharge — ouvre le canal. Le signal est par conséquent exact :
-il dit « sur le socle », pas « quelque part à proximité ».
+The last two cases are what give the test its value. A powered-off controller
+sitting thirty centimetres from the dongle stays silent: this is neither a
+remembered pairing nor mere radio range. Only the dock's contact — the very one
+that charges it — opens the channel. The signal is therefore exact: it says "on
+the dock", not "somewhere nearby".
 
-Le niveau de charge, lui, reste hors d'atteinte : il ne circule que dans les
-rapports d'entrée, qu'une manette éteinte n'émet pas.
+The level, however, remains out of reach: it travels only in the input reports,
+which a powered-off controller does not emit.
 
-### Fausses pistes, pour mémoire
+### Two mistakes worth recording
 
-L'attribut `0x0B` ne porte pas le niveau, mais il a fallu deux erreurs pour
-l'établir.
+**The state byte lied once.** A single reading taken on the dock showed `0x04`,
+hence the hasty conclusion that `0x04` meant "charging". The battery was in fact
+already full: `0x04` means *charged*, and `0x02` is what signals a charge in
+progress. Generalising from one measurement produced an indicator that could
+never light up.
 
-Il valait `4000` quel que soit l'état réel de la batterie, sans varier d'un
-millivolt sur quatre minutes. J'en ai conclu à une constante de conception. Ces
-quatre minutes se passaient toutes **manette éveillée** : interrogé éteinte sur
-son socle, il vaut `64000`.
+Nothing in the tests could have caught it — they faithfully replayed the misread
+sample. It took a contradictory observation, voltage and level climbing while
+`charging` was false, to bring it down.
 
-Une surveillance de trente minutes pendant une charge a tranché : il ne prend
-que ces deux valeurs, bascule avec l'état, et ne progresse jamais. Ce n'est donc
-ni une jauge, ni une constante — plutôt un champ dont le cadrage change selon
-l'état, ce que suggère l'écriture hexadécimale : `0x0FA0` contre `0xFA00`, les
-mêmes chiffres décalés d'un quartet.
+**Attribute `0x0B` is not a gauge, and not a constant either.** It read `4000`
+without moving over four minutes, hence "design constant". Those four minutes
+were all taken with the controller awake; queried powered-off on its dock, it
+reads `64000`. Thirty minutes of monitoring during a charge settled it: it takes
+only those two values, flips with the state, and never progresses. Its
+hexadecimal writing hints at the reason — `0x0FA0` against `0xFA00`, the same
+digits shifted by one nibble.
 
-La leçon vaut plus que le détail : conclure « c'est constant » depuis des
-relevés pris dans un seul état, c'est la même faute que conclure « 0x04 signifie
-en charge » depuis un unique échantillon.
+The lesson matters more than the detail: a field observed in a single state is
+not a field observed.
 
-Écartés de même : les registres lus par la commande `0x89`, qui sont de la
-configuration, et le rapport `0x7B`, qui porte de la télémétrie radio.
+Also ruled out: the registers read by command `0x89`, which are configuration,
+and report `0x7B`, which carries radio telemetry.
 
-## Construction
+## Icons
+
+The shapes come from [Material Symbols](https://fonts.google.com/icons),
+retouched, then rasterised **offline** at each of the four sizes Windows asks
+for depending on screen density — 16, 20, 24 and 32 pixels. Drawn at each size
+rather than resized: shrinking a 24 dp grid to 16 px puts strokes across two
+pixels and turns them grey.
+
+The generated masks carry opacity only. Colour is decided at render time, which
+lets the frame and the bolt follow the system theme — a light frame would vanish
+on a light taskbar — while level tints stay fixed, since they carry information
+rather than decoration.
+
+## Building
 
 ```bash
 cargo build --release      # target/release/sc-battery.exe
-cargo test                 # série complète, sans matériel
-cargo test -- --ignored    # relevé sur manette réelle, et planche de contrôle de l'icône
+cargo test                 # full suite, no hardware needed
+cargo test -- --ignored    # real-controller checks, and the icon contact sheet
 ```
-
-Deux dépendances : `hidapi` pour le dialogue avec la manette, `windows-sys`
-pour Win32. Ni framework graphique, ni runtime.
 
 ## Structure
 
-| Fichier | Rôle |
+| File | Role |
 |---|---|
-| [`src/hid.rs`](src/hid.rs) | Protocole et décodage. Ne connaît pas Win32. |
-| [`src/icon.rs`](src/icon.rs) | Dessin de l'icône, pixel par pixel. Fonctions pures. |
-| [`src/state.rs`](src/state.rs) | Machine à états, seuils de notification. Sans entrée-sortie. |
-| [`src/tray.rs`](src/tray.rs) | `Shell_NotifyIcon`, menu, ballons. |
-| [`src/autostart.rs`](src/autostart.rs) | Clé `Run` de l'utilisateur courant. |
-| [`src/settings.rs`](src/settings.rs) | Préférences, dans notre propre branche du registre. |
-| [`src/icons.rs`](src/icons.rs) | Masques des icônes, engendrés hors ligne. Ne pas modifier à la main. |
-| [`src/debug.rs`](src/debug.rs) | Mode de simulation, derrière `--debug`. |
-| [`src/main.rs`](src/main.rs) | Fenêtre cachée, fil de lecture, boucle de messages. |
+| [`src/hid.rs`](src/hid.rs) | Protocol and decoding. Knows nothing of Win32. |
+| [`src/icon.rs`](src/icon.rs) | Icon composition. Pure functions. |
+| [`src/icons.rs`](src/icons.rs) | Icon masks, generated offline. Do not edit by hand. |
+| [`src/state.rs`](src/state.rs) | State machine, notification thresholds. No I/O. |
+| [`src/tray.rs`](src/tray.rs) | `Shell_NotifyIcon`, menu, balloons. |
+| [`src/settings.rs`](src/settings.rs) | Preferences, in our own registry branch. |
+| [`src/autostart.rs`](src/autostart.rs) | The current user's `Run` key. |
+| [`src/i18n.rs`](src/i18n.rs) | Translations. A missing one does not compile. |
+| [`src/debug.rs`](src/debug.rs) | Simulation mode, behind `--debug`. |
+| [`src/main.rs`](src/main.rs) | Hidden window, reading thread, message loop. |
 
-## Limites
+## Limits
 
-- Liaison par dongle 2,4 GHz et USB seulement. Le Bluetooth emploie un autre
-  format de rapport et n'est pas géré.
-- Manette Steam Controller 2026 uniquement.
-- Windows uniquement.
+- 2.4 GHz dongle and USB only. Bluetooth uses another report format and is not
+  handled.
+- Steam Controller 2026 only.
+- Windows only.
 
-## Licence
+## Credits and licences
 
-MIT.
+This project is under the MIT licence. It incorporates third-party work:
+
+- **Icon shapes** derive from [Material Symbols](https://fonts.google.com/icons)
+  by Google, under the Apache 2.0 licence.
+- **The haptic frequency tables** come from
+  [SteamHapticsSinger](https://github.com/CrazyCritic89/SteamHapticsSinger) by
+  CrazyCritic89, after SteamControllerSinger by Pila, under BSD-3-Clause — by way
+  of the sibling project
+  [shs-studio](https://github.com/fraustiz/steam-haptics-studio).
