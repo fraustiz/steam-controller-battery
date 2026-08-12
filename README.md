@@ -24,20 +24,18 @@ dessine jamais ainsi. Et l'état « sur le socle » est atténué plutôt que pl
 faute de quoi il serait le dessin exact d'une batterie mesurée à 0 % en charge
 — état parfaitement réel, qu'une manette à plat sur son socle produit.
 
-Le clic droit propose **« Afficher le pourcentage »** : le niveau s'inscrit
-alors en chiffres dans la batterie. Éteint par défaut — le remplissage donne
-déjà le niveau, et deux chiffres occupent la moitié d'une icône de seize
-pixels.
+Le clic droit propose **« Afficher le pourcentage »**. Le nombre remplace alors
+entièrement la batterie, et prend sa couleur du niveau.
 
-Trois contraintes s'imposent d'elles-mêmes à cette taille. Le corps s'élargit
-pour héberger le nombre, sans quoi son aire utile ne ferait que cinq pixels de
-large quand deux chiffres en réclament six. Cent pour cent s'affiche sans
-nombre, trois chiffres ne tenant pas — une batterie pleine et verte se passe de
-commentaire. Et l'éclair de charge cède la place au chiffre, l'infobulle
-gardant l'information.
+Ce remplacement n'est pas un choix esthétique mais une contrainte de place. Une
+première version inscrivait le chiffre *dans* la batterie : le contour ne
+laissait que huit pixels utiles, donc des chiffres de 3×5, à la limite du
+déchiffrable. Sans cadre, les mêmes chiffres occupent 6×10 — quatre fois la
+surface. Le niveau reste lisible d'un coup d'œil puisqu'il donne sa couleur au
+nombre, et la charge passe dans l'infobulle.
 
 Les chiffres sont une police bitmap dessinée à la main, alignée au pixel :
-confiés à GDI, ils s'étaleraient sur deux pixels gris et deviendraient
+confiés à GDI, ils s'étaleraient sur deux pixels gris et redeviendraient
 illisibles.
 
 Le clic droit propose aussi **« Faire sonner la manette »** : une sonnerie jouée sur

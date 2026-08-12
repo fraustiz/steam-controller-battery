@@ -343,64 +343,59 @@ fn digits_mask(value: u8, scale: u32, spacing: u32) -> (Vec<bool>, u32, u32) {
     (mask, w, h)
 }
 
-/// Inscrit le pourcentage à l'intérieur du corps de la batterie.
+/// Assombrit une couleur, pour qu'elle tienne sur un fond clair.
+fn darken(c: (u8, u8, u8), factor: f32) -> (u8, u8, u8) {
+    let f = |v: u8| (v as f32 * factor).round().clamp(0.0, 255.0) as u8;
+    (f(c.0), f(c.1), f(c.2))
+}
+
+/// Dessine le pourcentage, seul, aussi gros que l'icône le permet.
 ///
-/// Confiné au corps, jamais par-dessus : laisser le chiffre déborder oblige à
-/// creuser un liseré au travers du contour, et la batterie paraît alors
-/// cassée. La contrepartie est qu'à seize pixels il n'y a de place que pour
-/// deux chiffres — cent pour cent s'affiche donc sans nombre, une batterie
-/// pleine et verte n'ayant besoin d'aucun commentaire.
-fn draw_percent(px: &mut [u32], size: u32, g: &Geometry, percent: u8, color: (u8, u8, u8)) {
-    if percent >= 100 {
+/// Le cadre de la batterie est délibérément absent dans ce mode. À seize
+/// pixels, il ne laissait que huit pixels utiles : deux chiffres y tenaient en
+/// 3×5, à la limite du déchiffrable. Sans cadre, les mêmes chiffres passent à
+/// 6×10 — quatre fois la surface. Le niveau reste lisible d'un coup d'œil,
+/// puisque c'est lui qui donne sa couleur au nombre.
+fn draw_percent(px: &mut [u32], size: u32, percent: u8, dark_theme: bool) {
+    let percent = percent.min(100);
+    let digits = match percent {
+        0..=9 => 1u32,
+        10..=99 => 2,
+        _ => 3,
+    };
+    // Une marge d'un pixel de chaque côté : un chiffre qui affleure le bord
+    // paraît rogné dans la barre des tâches.
+    let margin = (size / 16).max(1);
+    let avail = size - 2 * margin;
+
+    let scale = (1..=8u32)
+        .rev()
+        .find(|&sc| {
+            let w = (digits * DIGIT_W + (digits - 1) * DIGIT_SPACING) * sc;
+            w <= avail && DIGIT_H * sc <= avail
+        })
+        .unwrap_or(1);
+
+    let (mask, w, h) = digits_mask(percent, scale, DIGIT_SPACING);
+    if w > size || h > size {
         return;
     }
-    let avail_w = (g.inner.2 - g.inner.0).floor() as u32;
-    let avail_h = (g.inner.3 - g.inner.1).floor() as u32;
+    let ox = ((size - w) / 2) as i64;
+    let oy = ((size - h) / 2) as i64;
 
-    // La plus grande échelle qui tienne, espacement compris quand c'est possible.
-    let digits = if percent >= 10 { 2u32 } else { 1 };
-    let (scale, spacing) = (1..=8u32)
-        .rev()
-        .flat_map(|sc| [(sc, DIGIT_SPACING), (sc, 0)])
-        .find(|&(sc, sp)| {
-            let w = (digits * DIGIT_W + (digits - 1) * sp) * sc;
-            w <= avail_w && DIGIT_H * sc <= avail_h
-        })
-        .unwrap_or((0, 0));
-    if scale == 0 {
-        return; // pas la place : mieux vaut rien qu'un chiffre tronqué
-    }
-
-    let (mask, w, h) = digits_mask(percent, scale, spacing);
-    let ox = (g.inner.0 + (avail_w - w) as f32 / 2.0).round() as i64;
-    let oy = (g.inner.1 + (avail_h - h) as f32 / 2.0).round() as i64;
-
-    let lit = |x: i64, y: i64| -> bool {
-        let (x, y) = (x - ox, y - oy);
-        (0..w as i64).contains(&x)
-            && (0..h as i64).contains(&y)
-            && mask[(y as u32 * w + x as u32) as usize]
+    let colour = {
+        let c = level_color(percent);
+        // Les tons vifs du niveau passent mal sur une barre des tâches claire.
+        if dark_theme { c } else { darken(c, 0.72) }
     };
 
-    // Liseré d'un pixel autour du chiffre, sans quoi il se perdrait dans le
-    // remplissage lorsque les deux ont un ton voisin.
-    //
-    // Tout est borné à l'aire utile : c'est ce qui garantit que le contour
-    // survive au chiffre. Un contour entamé ferait paraître la batterie
-    // cassée, et c'est elle qui porte le sens de l'icône.
-    for y in 0..size as i64 {
-        for x in 0..size as i64 {
-            let inside = in_rounded_rect(x as f32 + 0.5, y as f32 + 0.5, g.inner, g.radius * 0.5);
-            if !inside {
+    for y in 0..h as i64 {
+        for x in 0..w as i64 {
+            if !mask[(y as u32 * w + x as u32) as usize] {
                 continue;
             }
-            let i = (y as u32 * size + x as u32) as usize;
-            if (-1..=1).any(|dy| (-1..=1).any(|dx| lit(x + dx, y + dy))) {
-                erase(&mut px[i], 1.0);
-            }
-            if lit(x, y) {
-                blend(&mut px[i], color, 1.0);
-            }
+            let i = ((oy + y) as u32 * size + (ox + x) as u32) as usize;
+            blend(&mut px[i], colour, 1.0);
         }
     }
 }
@@ -420,11 +415,18 @@ pub fn draw_themed(
     outline: (u8, u8, u8),
     show_percent: bool,
 ) {
+    // En mode chiffré, le nombre remplace entièrement la batterie : c'est le
+    // seul moyen d'obtenir des chiffres lisibles à seize pixels. Sa couleur
+    // porte le niveau, l'infobulle porte la charge.
+    if show_percent {
+        if let IconState::Battery(s) = state {
+            draw_percent(px, size, s.percent, outline.0 > 128);
+            return;
+        }
+    }
+
     match state {
-        // L'éclair cède la place au chiffre : à seize pixels, les deux ne
-        // tiennent pas ensemble dans le corps, et le liseré du nombre effacerait
-        // l'éclair de toute façon. La charge reste dans l'infobulle.
-        IconState::Battery(s) => draw_battery(px, size, &s, outline, show_percent, !show_percent),
+        IconState::Battery(s) => draw_battery(px, size, &s, outline, false, true),
         // Sur le socle et éteinte : elle charge, mais son niveau est hors
         // d'atteinte. La coque et l'éclair disent exactement cela — en charge,
         // niveau inconnu — là où un remplissage inventerait une mesure.
@@ -446,13 +448,6 @@ pub fn draw_themed(
         IconState::Disconnected => draw_plug(px, size, outline),
     }
 
-    // Le chiffre vient par-dessus tout le reste, et seulement quand il existe :
-    // l'inscrire sur une prise ou sur un socle inventerait une mesure.
-    if show_percent {
-        if let IconState::Battery(s) = state {
-            draw_percent(px, size, &Geometry::new_roomy(size as f32, true), s.percent, outline);
-        }
-    }
 }
 
 /// Une prise électrique : deux broches, un corps, un début de cordon.
@@ -729,78 +724,29 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_full_battery_needs_no_number() {
-        // Trois chiffres ne tiennent pas dans un corps de seize pixels, et une
-        // batterie pleine et verte se passe de commentaire.
-        //
-        // La silhouette reste celle du mode « avec chiffre » : la faire changer
-        // de largeur en atteignant cent pour cent ferait sauter l'icône.
-        let mut roomy_without_digits = vec![0u32; 16 * 16];
-        draw_battery(&mut roomy_without_digits, 16, &at(100, false), outline_color(), true, false);
-        assert_eq!(roomy_without_digits, buffer_with_percent(16, battery(100, false)));
-    }
+
+
 
     #[test]
-    fn asking_for_the_number_does_not_change_the_silhouette_between_levels() {
-        // Une icône qui s'élargirait ou se rétrécirait selon le niveau
-        // sauterait dans la barre des tâches à chaque pourcent franchi.
-        let width = |px: &[u32]| {
-            let cols: Vec<usize> = (0..16)
-                .filter(|&x| (0..16).any(|y| (px[y * 16 + x] >> 24) & 0xFF > 40))
+    fn the_number_is_drawn_large_enough_to_read() {
+        // Le point de tout ce mode : à seize pixels, deux chiffres doivent
+        // occuper 6×10 et non 3×5. Sous cette taille ils redeviennent des
+        // taches, ce qui était le défaut de la première version.
+        for percent in [42u8, 99] {
+            let px = buffer_with_percent(16, battery(percent, false));
+            let painted = px.iter().filter(|p| (*p >> 24) & 0xFF > 40).count();
+            assert!(painted > 40, "chiffre trop maigre pour {percent} % : {painted} pixels");
+
+            let rows: Vec<usize> = (0..16)
+                .filter(|&y| (0..16).any(|x| (px[y * 16 + x] >> 24) & 0xFF > 40))
                 .collect();
-            cols.last().unwrap() - cols.first().unwrap()
-        };
-        let reference = width(&buffer_with_percent(16, battery(50, false)));
-        for p in [0u8, 7, 42, 99, 100] {
-            assert_eq!(
-                width(&buffer_with_percent(16, battery(p, false))),
-                reference,
-                "la silhouette change à {p} %"
-            );
+            let height = rows.last().unwrap() - rows.first().unwrap() + 1;
+            assert!(height >= 9, "chiffre haut de {height} px seulement");
         }
     }
 
     #[test]
-    fn the_number_never_breaks_the_battery_outline() {
-        // Le contour doit survivre au chiffre : c'est lui qui fait lire
-        // « batterie » plutôt que « nombre posé là ».
-        for percent in [5u8, 42, 99] {
-            // Même géométrie de part et d'autre : on compare le dessin avec et
-            // sans chiffre, pas deux silhouettes différentes.
-            let mut plain = vec![0u32; 32 * 32];
-            draw_battery(&mut plain, 32, &at(percent, false), outline_color(), true, false);
-            let numbered = buffer_with_percent(32, battery(percent, false));
-            let g = Geometry::new_roomy(32.0, true);
-            for y in 0..32u32 {
-                for x in 0..32u32 {
-                    let inside = in_rounded_rect(x as f32 + 0.5, y as f32 + 0.5, g.inner, g.radius * 0.5);
-                    if inside {
-                        continue;
-                    }
-                    let i = (y * 32 + x) as usize;
-                    assert_eq!(
-                        plain[i], numbered[i],
-                        "le chiffre a mordu hors du corps en ({x},{y}) à {percent} %"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn the_percentage_is_actually_drawn() {
-        // Comparaison à géométrie égale : sinon le test passerait au seul
-        // motif que la silhouette diffère, sans qu'aucun chiffre soit tracé.
-        for percent in [5u8, 42, 99] {
-            let mut without = vec![0u32; 16 * 16];
-            draw_battery(&mut without, 16, &at(percent, false), outline_color(), true, false);
-            let with = buffer_with_percent(16, battery(percent, false));
-            assert_ne!(without, with, "aucun chiffre tracé pour {percent} %");
-        }
-
-        // Deux niveaux voisins doivent produire des dessins différents, même
-        // quand leur remplissage se ressemble au pixel près.
+    fn neighbouring_levels_are_told_apart() {
         assert_ne!(
             buffer_with_percent(16, battery(42, false)),
             buffer_with_percent(16, battery(43, false))
@@ -899,14 +845,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_bolt_gives_way_to_the_number() {
-        // Les deux ne tiennent pas ensemble à seize pixels. Ce qui compte est
-        // que le choix soit franc : avec le chiffre, aucune trace d'éclair.
-        let charging = buffer_with_percent(16, battery(60, true));
-        let idle = buffer_with_percent(16, battery(60, false));
-        assert_eq!(charging, idle, "un reste d'éclair subsiste sous le chiffre");
-    }
 
     #[test]
     fn charging_adds_the_bolt() {

@@ -346,11 +346,12 @@ const RINGTONE: &[(u16, u8, u16)] = &[
     (70, 3, 0),
 ];
 
-/// Nombre de passages. Une seule fois, la sonnerie dure à peine plus d'une
-/// seconde : trop court pour se repérer dans une pièce.
-const RINGTONE_REPEATS: usize = 3;
+/// Nombre de passages. Un seul : une sonnerie qui se répète devient vite
+/// pénible, et celle-ci sert à identifier une manette autant qu'à la retrouver.
+const RINGTONE_REPEATS: usize = 1;
 
-/// Silence entre deux passages.
+/// Silence entre deux passages. Sans effet à un seul passage, mais la boucle
+/// reste écrite pour en accepter davantage.
 const RINGTONE_GAP: Duration = Duration::from_millis(450);
 
 /// Tous les actionneurs de la manette. Sert à garantir le silence final, quels
@@ -683,11 +684,11 @@ mod tests {
     }
 
     #[test]
-    fn the_ringtone_lasts_long_enough_to_locate_but_not_to_annoy() {
+    fn the_ringtone_is_short_enough_not_to_annoy() {
         let once: u32 = RINGTONE.iter().map(|e| e.0 as u32).sum();
         let total = (once + RINGTONE_GAP.as_millis() as u32) * RINGTONE_REPEATS as u32;
-        assert!(total > 3_000, "trop court pour se repérer : {total} ms");
-        assert!(total < 15_000, "trop long : {total} ms");
+        assert!(total > 500, "sonnerie inaudible : {total} ms");
+        assert!(total < 5_000, "trop long : {total} ms");
     }
 
     #[test]
