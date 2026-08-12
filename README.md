@@ -24,10 +24,17 @@ dessine jamais ainsi. Et l'état « sur le socle » est atténué plutôt que pl
 faute de quoi il serait le dessin exact d'une batterie mesurée à 0 % en charge
 — état parfaitement réel, qu'une manette à plat sur son socle produit.
 
-Le clic droit propose **« Faire sonner la manette »** : trois notes montantes
-sur ses actionneurs haptiques, pour la retrouver ou savoir de laquelle il
-s'agit. L'entrée est grisée quand la manette est éteinte, ses actionneurs ne
-recevant alors rien.
+Le clic droit propose **« Faire sonner la manette »** : une sonnerie jouée sur
+ses actionneurs haptiques, pour la retrouver ou savoir de laquelle il s'agit.
+L'entrée est grisée quand la manette est éteinte, ses actionneurs ne recevant
+alors rien.
+
+La mélodie vient d'un fichier MIDI, converti **hors ligne** en table figée par
+un petit outil séparé. Embarquer un analyseur MIDI pour rejouer une seconde et
+demie de musique aurait coûté une dépendance entière contre quelques centaines
+d'octets de table. Le principe et les tables de fréquences viennent de
+[shs-studio](https://github.com/fraustiz/steam-haptics-studio), lui-même porté
+de SteamHapticsSinger.
 
 - **Survol** — pourcentage, tension, état de charge.
 - **Clic gauche** — relance la lecture si elle s'était arrêtée faute de matériel.

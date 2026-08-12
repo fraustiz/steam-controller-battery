@@ -313,10 +313,49 @@ const RETRY_DELAY: Duration = Duration::from_secs(5);
 /// Rapport de sortie pilotant les actionneurs haptiques.
 const RPT_HAPTIC: u8 = 0x83;
 
-/// Actionneurs utilisés pour le carillon. Les deux premiers sont sous les
-/// trackpads, les suivants sont les moteurs de vibration : les faire sonner
-/// ensemble porte plus loin qu'un seul.
-const LOCATOR_ACTUATORS: [u8; 4] = [0, 1, 3, 4];
+/// Sonnerie, convertie depuis `persona_3_reload_phone.mid`.
+///
+/// Chaque entrée est `(attente en millisecondes avant l'événement,
+/// actionneur, fréquence)`. Une fréquence nulle arrête l'actionneur.
+const RINGTONE: &[(u16, u8, u16)] = &[
+    (174, 3, 1008),
+    (23, 0, 1105),
+    (47, 3, 0),
+    (11, 3, 2992),
+    (0, 4, 1510),
+    (12, 0, 0),
+    (58, 3, 0),
+    (23, 4, 0),
+    (81, 4, 1008),
+    (70, 4, 0),
+    (24, 4, 1510),
+    (81, 4, 0),
+    (174, 4, 1897),
+    (46, 3, 1008),
+    (35, 4, 0),
+    (23, 4, 1131),
+    (12, 3, 0),
+    (35, 3, 1510),
+    (23, 4, 0),
+    (58, 3, 0),
+    (82, 3, 1008),
+    (46, 4, 1131),
+    (23, 3, 0),
+    (12, 3, 1510),
+    (34, 4, 0),
+    (70, 3, 0),
+];
+
+/// Nombre de passages. Une seule fois, la sonnerie dure à peine plus d'une
+/// seconde : trop court pour se repérer dans une pièce.
+const RINGTONE_REPEATS: usize = 3;
+
+/// Silence entre deux passages.
+const RINGTONE_GAP: Duration = Duration::from_millis(450);
+
+/// Tous les actionneurs de la manette. Sert à garantir le silence final, quels
+/// que soient ceux que la mélodie a réellement employés.
+const ALL_ACTUATORS: [u8; 5] = [0, 1, 2, 3, 4];
 
 /// Amplitude maximale. L'octet est signé : 127 est le plus fort.
 const LOCATOR_GAIN: u8 = 127;
@@ -349,37 +388,36 @@ fn haptic_off(actuator: u8) -> [u8; 64] {
 
 /// Fait sonner la manette, pour la retrouver ou savoir de laquelle il s'agit.
 ///
-/// Trois notes ascendantes, répétées trois fois : une suite qui monte se
-/// distingue d'une vibration de jeu, et se localise mieux à l'oreille qu'un
-/// bourdonnement continu.
+/// La mélodie passe par les actionneurs haptiques, seule chose que cette
+/// manette sache faire vibrer ou sonner. Les fréquences ont été converties
+/// hors ligne depuis le fichier MIDI : embarquer un analyseur pour rejouer une
+/// seconde et demie de musique aurait coûté une dépendance entière pour
+/// quelques centaines d'octets de table.
 ///
 /// Exige une manette allumée : les actionneurs d'une manette éteinte ne
 /// reçoivent rien, même posée sur son socle.
 pub fn play_locator_chime() -> Result<(), ProbeError> {
-    /// La, ré, sol de l'octave supérieure. Assez aigu pour porter.
-    const NOTES: [u16; 3] = [880, 1174, 1568];
-    const NOTE_MS: u64 = 130;
-    const GAP_MS: u64 = 40;
-
     let api = hidapi::HidApi::new().map_err(|e| ProbeError::HidUnavailable(e.to_string()))?;
     let (dev, _) = open_emitting_slot(&api)?;
 
-    for _ in 0..3 {
-        for hz in NOTES {
-            for a in LOCATOR_ACTUATORS {
-                let _ = dev.write(&haptic_on(a, hz));
+    for _ in 0..RINGTONE_REPEATS {
+        for &(wait_ms, actuator, freq) in RINGTONE {
+            if wait_ms > 0 {
+                std::thread::sleep(Duration::from_millis(wait_ms as u64));
             }
-            std::thread::sleep(Duration::from_millis(NOTE_MS));
+            let report = if freq == 0 {
+                haptic_off(actuator)
+            } else {
+                haptic_on(actuator, freq)
+            };
+            let _ = dev.write(&report);
         }
-        for a in LOCATOR_ACTUATORS {
-            let _ = dev.write(&haptic_off(a));
-        }
-        std::thread::sleep(Duration::from_millis(GAP_MS * 4));
+        std::thread::sleep(RINGTONE_GAP);
     }
 
-    // Silence garanti même si une écriture s'est perdue : une manette laissée
-    // en vibration continue serait pire que pas de carillon du tout.
-    for a in LOCATOR_ACTUATORS {
+    // Silence garanti, même si une écriture s'est perdue en route : une manette
+    // laissée en vibration continue serait pire que pas de sonnerie du tout.
+    for a in ALL_ACTUATORS {
         let _ = dev.write(&haptic_off(a));
     }
     Ok(())
@@ -625,8 +663,36 @@ mod tests {
     }
 
     #[test]
+    fn the_ringtone_never_leaves_an_actuator_running() {
+        // Le pire défaut possible : une manette qu'on fait sonner et qui
+        // continue de vibrer indéfiniment. Chaque note allumée doit être
+        // éteinte, et aucune ne doit en écraser une autre déjà en cours.
+        let mut running = [false; 8];
+        for &(_, actuator, freq) in RINGTONE {
+            let a = actuator as usize;
+            assert!(a < running.len(), "actionneur hors bornes : {actuator}");
+            if freq == 0 {
+                assert!(running[a], "extinction d'un actionneur déjà au repos : {actuator}");
+                running[a] = false;
+            } else {
+                assert!(!running[a], "note posée sur un actionneur occupé : {actuator}");
+                running[a] = true;
+            }
+        }
+        assert!(running.iter().all(|r| !r), "la sonnerie laisse un actionneur en marche");
+    }
+
+    #[test]
+    fn the_ringtone_lasts_long_enough_to_locate_but_not_to_annoy() {
+        let once: u32 = RINGTONE.iter().map(|e| e.0 as u32).sum();
+        let total = (once + RINGTONE_GAP.as_millis() as u32) * RINGTONE_REPEATS as u32;
+        assert!(total > 3_000, "trop court pour se repérer : {total} ms");
+        assert!(total < 15_000, "trop long : {total} ms");
+    }
+
+    #[test]
     fn the_chime_silences_every_actuator_it_touches() {
-        for a in LOCATOR_ACTUATORS {
+        for a in ALL_ACTUATORS {
             let off = haptic_off(a);
             assert_eq!(off[0], RPT_HAPTIC);
             assert_eq!(off[1], a);
@@ -646,6 +712,17 @@ mod tests {
             ProbeError::ControllerOffline.tooltip()
         );
         assert!(ProbeError::ControllerDocked.tooltip().contains("socle"));
+    }
+
+    /// Fait réellement sonner la manette. À lancer manette allumée :
+    /// `cargo test -- --ignored plays_the_ringtone`
+    #[test]
+    #[ignore = "fait sonner une manette allumée"]
+    fn plays_the_ringtone_on_real_hardware() {
+        match play_locator_chime() {
+            Ok(()) => println!("sonnerie jouée"),
+            Err(e) => panic!("impossible de jouer : {e:?} — {}", e.tooltip()),
+        }
     }
 
     /// Vérification sur matériel réel :
