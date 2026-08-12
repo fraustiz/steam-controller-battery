@@ -202,12 +202,23 @@ rapports d'entrée, qu'une manette éteinte n'émet pas.
 
 ### Fausses pistes, pour mémoire
 
-L'attribut `0x0B`, rendu par la commande `0x83` sur le canal de commande, vaut
-`4000` quel que soit l'état réel de la batterie : à 100 % en charge comme à
-94 % sur batterie, et sans varier d'un millivolt sur quatre minutes
-d'observation. C'est une constante de conception, probablement la tension
-nominale de la cellule. Elle ressemble suffisamment à une mesure pour avoir
-coûté une hypothèse entière.
+L'attribut `0x0B` ne porte pas le niveau, mais il a fallu deux erreurs pour
+l'établir.
+
+Il valait `4000` quel que soit l'état réel de la batterie, sans varier d'un
+millivolt sur quatre minutes. J'en ai conclu à une constante de conception. Ces
+quatre minutes se passaient toutes **manette éveillée** : interrogé éteinte sur
+son socle, il vaut `64000`.
+
+Une surveillance de trente minutes pendant une charge a tranché : il ne prend
+que ces deux valeurs, bascule avec l'état, et ne progresse jamais. Ce n'est donc
+ni une jauge, ni une constante — plutôt un champ dont le cadrage change selon
+l'état, ce que suggère l'écriture hexadécimale : `0x0FA0` contre `0xFA00`, les
+mêmes chiffres décalés d'un quartet.
+
+La leçon vaut plus que le détail : conclure « c'est constant » depuis des
+relevés pris dans un seul état, c'est la même faute que conclure « 0x04 signifie
+en charge » depuis un unique échantillon.
 
 Écartés de même : les registres lus par la commande `0x89`, qui sont de la
 configuration, et le rapport `0x7B`, qui porte de la télémétrie radio.

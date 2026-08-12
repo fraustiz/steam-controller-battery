@@ -45,11 +45,20 @@
 //!
 //! # Ce qui a été écarté
 //!
-//! L'attribut 0x0B, obtenu par la commande 0x83 sur le canal de commande,
-//! valait invariablement 4000 quel que soit l'état réel de la batterie, y
-//! compris à 100 % en charge et à 94 % sur batterie. C'est une constante de
-//! conception, pas une mesure. Les registres lus par la commande 0x89 sont de
-//! la configuration, et le rapport 0x7B porte de la télémétrie radio.
+//! L'attribut 0x0B, obtenu par la commande 0x83 sur le canal de commande, ne
+//! porte pas le niveau. Il a d'abord été décrit ici comme une constante de
+//! conception, sur la foi de relevés qui le montraient figé à 4000 — mais tous
+//! avaient été pris manette éveillée. Interrogé manette éteinte sur son socle,
+//! il vaut 64000.
+//!
+//! Une surveillance de trente minutes pendant une charge a tranché : il ne
+//! prend que ces deux valeurs, bascule avec l'état, et ne progresse jamais avec
+//! la charge. Ce n'est donc ni une jauge, ni une constante — plutôt un champ
+//! dont le cadrage change selon l'état, ce que suggère l'écriture hexadécimale :
+//! 0x0FA0 contre 0xFA00, les mêmes chiffres décalés d'un quartet.
+//!
+//! Écartés de même : les registres lus par la commande 0x89, qui sont de la
+//! configuration, et le rapport 0x7B, qui porte de la télémétrie radio.
 
 use std::time::{Duration, Instant};
 
