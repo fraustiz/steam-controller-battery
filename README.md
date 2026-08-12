@@ -6,6 +6,10 @@ The battery level of the Steam Controller 2026, permanently, in the Windows
 notification area. A single binary of about 250 KB — no runtime, no installer —
 that costs nothing at all when the controller is away.
 
+![The icon, across every state](docs/apercu-icones.png)
+
+*Every state, on a dark then a light taskbar — enlarged, then at actual size.*
+
 Native Rust, two dependencies: `hidapi` to talk to the controller, `windows-sys`
 for Win32. No GUI framework.
 

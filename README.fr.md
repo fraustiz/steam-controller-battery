@@ -7,6 +7,10 @@ de notification de Windows. Un binaire unique d'environ 250 Ko — sans runtime,
 sans installateur — qui ne coûte rigoureusement rien quand la manette n'est pas
 là.
 
+![L'icône, dans tous ses états](docs/apercu-icones.png)
+
+*Tous les états, sur barre sombre puis claire — agrandis, puis à taille réelle.*
+
 Rust natif, deux dépendances : `hidapi` pour dialoguer avec la manette,
 `windows-sys` pour Win32. Aucun framework graphique.
 
