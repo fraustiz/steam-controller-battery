@@ -20,40 +20,42 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICO
 use crate::icons;
 use crate::state::IconState;
 
-/// Tailles auxquelles les masques ont été dessinés.
+/// Tailles auxquelles les icônes ont été dessinées.
 ///
 /// Ce sont celles que Windows demande à 100, 125, 150 et 200 % de mise à
-/// l'échelle. Toute autre taille est ramenée à la plus proche : mieux vaut une
-/// icône nette d'un pixel trop petite qu'une icône redimensionnée et floue.
+/// l'échelle. Toute autre est ramenée à la plus proche : mieux vaut une icône
+/// nette d'un pixel trop petite qu'une icône redimensionnée et floue.
 pub const BAKED_SIZES: [u32; 4] = [16, 20, 24, 32];
 
-/// Couleur du barreau, du plus vide au plus plein.
-const BAR_COLOURS: [(u8, u8, u8); 6] = [
+/// La taille dessinée la plus proche de celle demandée.
+pub fn snap_size(requested: u32) -> u32 {
+    *BAKED_SIZES.iter().min_by_key(|&&s| s.abs_diff(requested)).unwrap_or(&16)
+}
+
+/// Bornes hautes de chaque palier, du plus vide au plus plein.
+///
+/// Les paliers hauts sont larges parce qu'ils importent peu : entre 95 et 75 %
+/// la nuance n'intéresse personne. Les bas sont resserrés, puisque c'est là
+/// qu'on regarde l'icône. Le rouge cède avant la première notification, à 20 %,
+/// de sorte que la couleur prévienne avant le message.
+const LEVEL_LIMITS: [u8; 7] = [5, 16, 28, 42, 56, 70, 88];
+
+/// Teinte de chaque palier. Elle ne sert qu'au mode chiffré : dans les icônes,
+/// la couleur est déjà portée par les masques.
+const LEVEL_COLOURS: [(u8, u8, u8); 8] = [
+    (0xE6, 0x54, 0x38), // vide
     (0xE6, 0x54, 0x38), // rouge
     (0xEF, 0x9A, 0x28), // ambre
     (0xDF, 0xB5, 0x28), // jaune
     (0xA4, 0xBD, 0x32), // vert-jaune
+    (0x75, 0xB9, 0x3A), // vert clair
     (0x4E, 0xB4, 0x41), // vert
     (0x3D, 0xA6, 0x38), // vert soutenu
 ];
 
-/// Bornes hautes de chaque palier.
-///
-/// Les paliers hauts sont larges parce qu'ils importent peu : entre 95 et 75 %
-/// la nuance n'intéresse personne. Les bas sont resserrés, puisque c'est là
-/// qu'on regarde l'icône. Le passage au rouge tombe juste avant le premier
-/// seuil de notification, de sorte que la couleur prévient avant le message.
-const BAR_LIMITS: [u8; 5] = [15, 30, 50, 70, 88];
-
-/// Le biseau de la manette en charge garde une teinte fixe.
-///
-/// Il ne peut pas représenter un niveau — sa forme est constante — et le teinter
-/// selon la charge ferait croire à une mesure qu'il ne porte pas.
-const CHARGE_WEDGE: (u8, u8, u8) = (0x3D, 0xA6, 0x38);
-
 /// Le palier correspondant à un niveau.
-pub fn bar_index(percent: u8) -> usize {
-    BAR_LIMITS.iter().position(|&limit| percent <= limit).unwrap_or(BAR_LIMITS.len())
+pub fn level_index(percent: u8) -> usize {
+    LEVEL_LIMITS.iter().position(|&limit| percent <= limit).unwrap_or(LEVEL_LIMITS.len())
 }
 
 /// Encre des pièces de structure — cadre, téton, prise barrée.
@@ -65,104 +67,165 @@ pub fn structure_colour(dark_theme: bool) -> (u8, u8, u8) {
     }
 }
 
-/// Encre de l'éclair. Un jaune franc sur fond sombre ; le même, assombri en
-/// ocre, sur fond clair, où un jaune vif serait illisible.
-pub fn bolt_colour(dark_theme: bool) -> (u8, u8, u8) {
-    if dark_theme {
-        (0xFF, 0xF5, 0x00)
-    } else {
-        (0xB3, 0x8F, 0x00)
+/// Teintes qui doivent suivre le thème plutôt que rester telles quelles.
+///
+/// Les couleurs de niveau sont de l'information et ne bougent jamais. L'éclair
+/// et le violet du socle, eux, ne sont que des signaux d'état : un jaune vif
+/// sur une barre des tâches claire serait illisible, et c'est de la lisibilité
+/// qu'il s'agit, pas d'un changement de sens.
+fn theme_substitute(colour: (u8, u8, u8), dark_theme: bool) -> (u8, u8, u8) {
+    const BOLT: (u8, u8, u8) = (0xF8, 0xED, 0x01);
+    const DOCK: (u8, u8, u8) = (0xB3, 0x88, 0xFF);
+    match colour {
+        BOLT if !dark_theme => (0xB3, 0x8F, 0x00),
+        DOCK if !dark_theme => (0x6B, 0x3F, 0xC9),
+        other => other,
     }
 }
 
-/// Les pièces disponibles à une taille donnée.
-struct Art {
-    frame: &'static [u8],
-    nub: &'static [u8],
-    bars: [&'static [u8]; 6],
-    bolt_frame: &'static [u8],
-    bolt: &'static [u8],
-    wedge: &'static [u8],
-    off: [&'static [u8]; 2],
+/// Les huit icônes de niveau, leurs variantes en charge, et les deux états
+/// sans mesure — pour une taille donnée.
+struct LayerSet {
+    levels: [&'static [icons::Layer]; 8],
+    charging: [&'static [icons::Layer]; 8],
+    docked: &'static [icons::Layer],
+    unplugged: &'static [icons::Layer],
 }
 
-/// Construit le jeu de pièces d'une taille. Une branche par taille : les noms
-/// des masques sont engendrés, les assembler par macro générative coûterait
-/// plus de lisibilité que de lignes économisées.
-macro_rules! art_for {
-    (16) => {
-        Art {
-            frame: &icons::FRAME_16,
-            nub: &icons::NUB_16,
-            bars: [
-                &icons::BAR1_16, &icons::BAR2_16, &icons::BAR3_16,
-                &icons::BAR4_16, &icons::BAR6_16, &icons::BARFULL_16,
-            ],
-            bolt_frame: &icons::BOLTFRAME_16,
-            bolt: &icons::BOLT_16,
-            wedge: &icons::CHARGEWEDGE_16,
-            off: [&icons::OFF1_16, &icons::OFF2_16],
+impl LayerSet {
+    fn pick(&self, state: IconState) -> &'static [icons::Layer] {
+        match state {
+            // La charge a sa propre icône par palier : le biseau y porte la
+            // couleur du niveau, ce qu'une icône unique ne saurait faire.
+            IconState::Battery(s) if s.charging => self.charging[level_index(s.percent)],
+            IconState::Battery(s) => self.levels[level_index(s.percent)],
+            // Éteinte sur son socle, le niveau est hors d'atteinte : l'icône ne
+            // doit rien en laisser deviner.
+            IconState::Docked => self.docked,
+            IconState::Disconnected => self.unplugged,
         }
-    };
-    (20) => {
-        Art {
-            frame: &icons::FRAME_20,
-            nub: &icons::NUB_20,
-            bars: [
-                &icons::BAR1_20, &icons::BAR2_20, &icons::BAR3_20,
-                &icons::BAR4_20, &icons::BAR6_20, &icons::BARFULL_20,
-            ],
-            bolt_frame: &icons::BOLTFRAME_20,
-            bolt: &icons::BOLT_20,
-            wedge: &icons::CHARGEWEDGE_20,
-            off: [&icons::OFF1_20, &icons::OFF2_20],
-        }
-    };
-    (24) => {
-        Art {
-            frame: &icons::FRAME_24,
-            nub: &icons::NUB_24,
-            bars: [
-                &icons::BAR1_24, &icons::BAR2_24, &icons::BAR3_24,
-                &icons::BAR4_24, &icons::BAR6_24, &icons::BARFULL_24,
-            ],
-            bolt_frame: &icons::BOLTFRAME_24,
-            bolt: &icons::BOLT_24,
-            wedge: &icons::CHARGEWEDGE_24,
-            off: [&icons::OFF1_24, &icons::OFF2_24],
-        }
-    };
-    (32) => {
-        Art {
-            frame: &icons::FRAME_32,
-            nub: &icons::NUB_32,
-            bars: [
-                &icons::BAR1_32, &icons::BAR2_32, &icons::BAR3_32,
-                &icons::BAR4_32, &icons::BAR6_32, &icons::BARFULL_32,
-            ],
-            bolt_frame: &icons::BOLTFRAME_32,
-            bolt: &icons::BOLT_32,
-            wedge: &icons::CHARGEWEDGE_32,
-            off: [&icons::OFF1_32, &icons::OFF2_32],
-        }
-    };
+    }
 }
 
-/// La taille dessinée la plus proche de celle demandée.
-pub fn snap_size(requested: u32) -> u32 {
-    *BAKED_SIZES
+/// Écrite en clair plutôt qu'engendrée par macro : les noms viennent déjà d'un
+/// générateur, en empiler un second rendrait l'ensemble impossible à relire.
+const LAYER_TABLE: [(u32, LayerSet); 4] = [
+    (
+        16,
+        LayerSet {
+            levels: [
+            &icons::BATTERY_EMPTY_16,
+            &icons::BATTERY_1_16,
+            &icons::BATTERY_2_16,
+            &icons::BATTERY_3_16,
+            &icons::BATTERY_4_16,
+            &icons::BATTERY_5_16,
+            &icons::BATTERY_6_16,
+            &icons::BATTERY_FULL_16,
+            ],
+            charging: [
+            &icons::BATTERY_EMPTY_CHARGING_16,
+            &icons::BATTERY_1_CHARGING_16,
+            &icons::BATTERY_2_CHARGING_16,
+            &icons::BATTERY_3_CHARGING_16,
+            &icons::BATTERY_4_CHARGING_16,
+            &icons::BATTERY_5_CHARGING_16,
+            &icons::BATTERY_6_CHARGING_16,
+            &icons::BATTERY_FULL_CHARGING_16,
+            ],
+            docked: &icons::BATTERY_DOCKED_16,
+            unplugged: &icons::UNPLUGGED_16,
+        },
+    ),
+    (
+        20,
+        LayerSet {
+            levels: [
+            &icons::BATTERY_EMPTY_20,
+            &icons::BATTERY_1_20,
+            &icons::BATTERY_2_20,
+            &icons::BATTERY_3_20,
+            &icons::BATTERY_4_20,
+            &icons::BATTERY_5_20,
+            &icons::BATTERY_6_20,
+            &icons::BATTERY_FULL_20,
+            ],
+            charging: [
+            &icons::BATTERY_EMPTY_CHARGING_20,
+            &icons::BATTERY_1_CHARGING_20,
+            &icons::BATTERY_2_CHARGING_20,
+            &icons::BATTERY_3_CHARGING_20,
+            &icons::BATTERY_4_CHARGING_20,
+            &icons::BATTERY_5_CHARGING_20,
+            &icons::BATTERY_6_CHARGING_20,
+            &icons::BATTERY_FULL_CHARGING_20,
+            ],
+            docked: &icons::BATTERY_DOCKED_20,
+            unplugged: &icons::UNPLUGGED_20,
+        },
+    ),
+    (
+        24,
+        LayerSet {
+            levels: [
+            &icons::BATTERY_EMPTY_24,
+            &icons::BATTERY_1_24,
+            &icons::BATTERY_2_24,
+            &icons::BATTERY_3_24,
+            &icons::BATTERY_4_24,
+            &icons::BATTERY_5_24,
+            &icons::BATTERY_6_24,
+            &icons::BATTERY_FULL_24,
+            ],
+            charging: [
+            &icons::BATTERY_EMPTY_CHARGING_24,
+            &icons::BATTERY_1_CHARGING_24,
+            &icons::BATTERY_2_CHARGING_24,
+            &icons::BATTERY_3_CHARGING_24,
+            &icons::BATTERY_4_CHARGING_24,
+            &icons::BATTERY_5_CHARGING_24,
+            &icons::BATTERY_6_CHARGING_24,
+            &icons::BATTERY_FULL_CHARGING_24,
+            ],
+            docked: &icons::BATTERY_DOCKED_24,
+            unplugged: &icons::UNPLUGGED_24,
+        },
+    ),
+    (
+        32,
+        LayerSet {
+            levels: [
+            &icons::BATTERY_EMPTY_32,
+            &icons::BATTERY_1_32,
+            &icons::BATTERY_2_32,
+            &icons::BATTERY_3_32,
+            &icons::BATTERY_4_32,
+            &icons::BATTERY_5_32,
+            &icons::BATTERY_6_32,
+            &icons::BATTERY_FULL_32,
+            ],
+            charging: [
+            &icons::BATTERY_EMPTY_CHARGING_32,
+            &icons::BATTERY_1_CHARGING_32,
+            &icons::BATTERY_2_CHARGING_32,
+            &icons::BATTERY_3_CHARGING_32,
+            &icons::BATTERY_4_CHARGING_32,
+            &icons::BATTERY_5_CHARGING_32,
+            &icons::BATTERY_6_CHARGING_32,
+            &icons::BATTERY_FULL_CHARGING_32,
+            ],
+            docked: &icons::BATTERY_DOCKED_32,
+            unplugged: &icons::UNPLUGGED_32,
+        },
+    ),
+];
+
+fn layers(state: IconState, size: u32) -> &'static [icons::Layer] {
+    LAYER_TABLE
         .iter()
-        .min_by_key(|&&s| s.abs_diff(requested))
-        .unwrap_or(&16)
-}
-
-fn art(size: u32) -> Art {
-    match size {
-        20 => art_for!(20),
-        24 => art_for!(24),
-        32 => art_for!(32),
-        _ => art_for!(16),
-    }
+        .find(|(s, _)| *s == size)
+        .map(|(_, set)| set.pick(state))
+        .unwrap_or_else(|| LAYER_TABLE[0].1.pick(state))
 }
 
 /// Composition « source par-dessus », en alpha non prémultiplié.
@@ -191,15 +254,6 @@ fn blend(dst: &mut u32, colour: (u8, u8, u8), alpha: f32) {
         | (mix(colour.0, dr) << 16)
         | (mix(colour.1, dg) << 8)
         | mix(colour.2, db);
-}
-
-/// Pose une pièce dans la couleur demandée.
-fn paint(px: &mut [u32], mask: &[u8], colour: (u8, u8, u8)) {
-    for (dst, &a) in px.iter_mut().zip(mask.iter()) {
-        if a > 0 {
-            blend(dst, colour, a as f32 / 255.0);
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -284,7 +338,7 @@ fn draw_percent(px: &mut [u32], size: u32, percent: u8, dark_theme: bool) {
     let (ox, oy) = ((size - w) / 2, (size - h) / 2);
 
     let colour = {
-        let c = BAR_COLOURS[bar_index(percent)];
+        let c = LEVEL_COLOURS[level_index(percent)];
         if dark_theme {
             c
         } else {
@@ -317,30 +371,14 @@ pub fn draw(px: &mut [u32], size: u32, state: IconState, show_percent: bool, dar
         }
     }
 
-    let a = art(size);
-    let structure = structure_colour(dark_theme);
-
-    match state {
-        IconState::Battery(s) if s.charging => {
-            paint(px, a.bolt_frame, structure);
-            paint(px, a.wedge, CHARGE_WEDGE);
-            paint(px, a.bolt, bolt_colour(dark_theme));
-        }
-        IconState::Battery(s) => {
-            paint(px, a.frame, structure);
-            paint(px, a.nub, structure);
-            paint(px, a.bars[bar_index(s.percent)], BAR_COLOURS[bar_index(s.percent)]);
-        }
-        // Éteinte sur son socle : elle charge, mais son niveau est hors
-        // d'atteinte. On montre donc l'éclair sans le moindre barreau, plutôt
-        // qu'un niveau inventé.
-        IconState::Docked => {
-            paint(px, a.bolt_frame, structure);
-            paint(px, a.bolt, bolt_colour(dark_theme));
-        }
-        IconState::Disconnected => {
-            for piece in a.off {
-                paint(px, piece, structure);
+    for (mask, colour) in layers(state, size) {
+        let ink = match colour {
+            Some(c) => theme_substitute(*c, dark_theme),
+            None => structure_colour(dark_theme),
+        };
+        for (dst, &a) in px.iter_mut().zip(mask.iter()) {
+            if a > 0 {
+                blend(dst, ink, a as f32 / 255.0);
             }
         }
     }
@@ -532,43 +570,58 @@ mod tests {
     }
 
     #[test]
-    fn every_mask_matches_its_size() {
+    fn every_icon_has_layers_of_the_right_size() {
         for size in BAKED_SIZES {
-            let a = art(size);
             let n = (size * size) as usize;
-            let mut pieces: Vec<&[u8]> =
-                vec![a.frame, a.nub, a.bolt_frame, a.bolt, a.wedge, a.off[0], a.off[1]];
-            pieces.extend_from_slice(&a.bars);
-            for piece in pieces {
-                assert_eq!(piece.len(), n, "pièce mal dimensionnée à {size} px");
+            for state in [
+                battery(0, false), battery(50, false), battery(100, false),
+                battery(50, true), IconState::Docked, IconState::Disconnected,
+            ] {
+                let l = layers(state, size);
+                assert!(!l.is_empty(), "aucune couche pour {state:?} à {size} px");
+                for (mask, _) in l {
+                    assert_eq!(mask.len(), n, "couche mal dimensionnée à {size} px");
+                }
             }
         }
     }
 
     #[test]
-    fn no_mask_is_empty() {
-        // Une pièce vide passerait inaperçue à l'exécution : l'icône
-        // s'afficherait simplement incomplète, sans erreur.
+    fn no_layer_is_empty() {
+        // Une couche vide passerait inaperçue : l'icône s'afficherait
+        // simplement incomplète, sans la moindre erreur.
         for size in BAKED_SIZES {
-            let a = art(size);
-            let mut named: Vec<(&str, &[u8])> = vec![
-                ("cadre", a.frame),
-                ("téton", a.nub),
-                ("cadre éclair", a.bolt_frame),
-                ("éclair", a.bolt),
-                ("biseau", a.wedge),
-                ("prise 1", a.off[0]),
-                ("prise 2", a.off[1]),
-            ];
-            for (i, bar) in a.bars.iter().enumerate() {
-                named.push((["b1", "b2", "b3", "b4", "b6", "bfull"][i], bar));
+            for p in [0u8, 10, 25, 40, 55, 65, 80, 100] {
+                for charging in [false, true] {
+                    for (mask, _) in layers(battery(p, charging), size) {
+                        assert!(
+                            mask.iter().any(|&v| v > 20),
+                            "couche vide à {size} px pour {p} % (charge : {charging})"
+                        );
+                    }
+                }
             }
-            for (label, mask) in named {
-                assert!(
-                    mask.iter().any(|&v| v > 20),
-                    "pièce « {label} » vide à {size} px"
-                );
-            }
+        }
+    }
+
+    #[test]
+    fn every_level_has_its_own_icon() {
+        let mut seen: Vec<Vec<u32>> = Vec::new();
+        for p in [0u8, 10, 22, 35, 50, 63, 80, 95] {
+            let px = buffer(16, battery(p, false), false);
+            assert!(!seen.contains(&px), "deux paliers dessinent la même icône ({p} %)");
+            seen.push(px);
+        }
+    }
+
+    #[test]
+    fn charging_differs_from_idle_at_every_level() {
+        for p in [0u8, 10, 22, 35, 50, 63, 80, 95] {
+            assert_ne!(
+                buffer(16, battery(p, false), false),
+                buffer(16, battery(p, true), false),
+                "la charge ne se voit pas à {p} %"
+            );
         }
     }
 
@@ -576,26 +629,32 @@ mod tests {
     fn the_thresholds_cover_the_whole_range_in_order() {
         let mut previous = 0;
         for p in 0..=100u8 {
-            let i = bar_index(p);
-            assert!(i < BAR_COLOURS.len(), "palier hors bornes à {p} %");
+            let i = level_index(p);
+            assert!(i < LEVEL_COLOURS.len(), "palier hors bornes à {p} %");
             assert!(i >= previous, "les paliers reculent à {p} %");
             previous = i;
         }
-        assert_eq!(bar_index(0), 0, "0 % doit être au palier le plus bas");
-        assert_eq!(bar_index(100), 5, "100 % doit être au palier le plus haut");
+        assert_eq!(level_index(0), 0, "0 % doit être au palier le plus bas");
+        assert_eq!(
+            level_index(100),
+            LEVEL_COLOURS.len() - 1,
+            "100 % doit être au palier le plus haut"
+        );
         // Le rouge doit céder avant la première notification, à 20 %.
-        assert!(bar_index(19) > 0, "encore rouge à 19 %, après le seuil d'alerte");
-        assert_eq!(bar_index(15), 0, "15 % doit encore être rouge");
+        // Le rouge doit avoir cédé avant la notification de 20 %.
+        assert!(level_index(19) >= 2, "encore rouge à 19 %, après le seuil d'alerte");
     }
 
     #[test]
     fn the_bar_colours_run_from_red_to_green() {
-        let first = BAR_COLOURS[0];
-        let last = BAR_COLOURS[BAR_COLOURS.len() - 1];
+        let first = LEVEL_COLOURS[0];
+        let last = LEVEL_COLOURS[LEVEL_COLOURS.len() - 1];
         assert!(first.0 > first.1, "le palier bas doit tirer sur le rouge");
         assert!(last.1 > last.0, "le palier haut doit tirer sur le vert");
-        // Aucune répétition : chaque palier doit se distinguer du précédent.
-        for w in BAR_COLOURS.windows(2) {
+        // « Vide » et le premier palier partagent le rouge, ce qui se défend :
+        // ce sont deux degrés de la même urgence. Au-delà, chaque palier doit
+        // se distinguer du précédent.
+        for w in LEVEL_COLOURS[1..].windows(2) {
             assert_ne!(w[0], w[1], "deux paliers de même couleur");
         }
     }
@@ -653,7 +712,19 @@ mod tests {
         // Le cadre doit s'adapter au fond ; la couleur du niveau est une
         // information, pas une décoration, et ne doit pas bouger.
         assert_ne!(structure_colour(true), structure_colour(false));
-        assert_ne!(bolt_colour(true), bolt_colour(false));
+        // L'éclair et le violet du socle sont des signaux d'état : ils
+        // s'adaptent au fond. Les teintes de niveau, non.
+        const BOLT: (u8, u8, u8) = (0xF8, 0xED, 0x01);
+        const DOCK: (u8, u8, u8) = (0xB3, 0x88, 0xFF);
+        assert_ne!(theme_substitute(BOLT, true), theme_substitute(BOLT, false));
+        assert_ne!(theme_substitute(DOCK, true), theme_substitute(DOCK, false));
+        for level in LEVEL_COLOURS {
+            assert_eq!(
+                theme_substitute(level, true),
+                theme_substitute(level, false),
+                "une teinte de niveau change avec le thème"
+            );
+        }
 
         let mut dark = vec![0u32; 16 * 16];
         let mut light = vec![0u32; 16 * 16];
@@ -661,7 +732,7 @@ mod tests {
         draw(&mut light, 16, battery(50, false), false, false);
         assert_ne!(dark, light, "le cadre doit suivre le thème");
 
-        let bar = BAR_COLOURS[bar_index(50)];
+        let bar = LEVEL_COLOURS[level_index(50)];
         let has_bar = |px: &[u32]| {
             px.iter().any(|p| {
                 let (r, g, b) = ((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF);

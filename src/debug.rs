@@ -89,8 +89,14 @@ pub const TOOLTIP_PREFIX: &str = "[simulation] ";
 mod tests {
     use super::*;
 
+    /// Un seul test, délibérément.
+    ///
+    /// L'état simulé est un global : des tests séparés s'exécuteraient en
+    /// parallèle et s'écraseraient l'un l'autre. Les enchaîner ici est plus
+    /// honnête qu'un verrou ajouté au code de production pour les besoins de
+    /// sa propre vérification.
     #[test]
-    fn the_simulated_reading_mirrors_the_real_shape() {
+    fn the_simulation_behaves_like_the_real_reading() {
         update(|s| {
             s.mode = Mode::Connected;
             s.percent = 42;
@@ -101,31 +107,21 @@ mod tests {
         assert!(r.charging);
         assert!(!r.full, "42 % ne peut pas être une charge terminée");
         assert!(r.voltage_mv.is_some_and(|v| (3000..=4500).contains(&v)));
-    }
 
-    #[test]
-    fn the_modes_map_onto_the_real_outcomes() {
+        // Une charge arrivée à son terme.
+        update(|s| s.percent = 100);
+        assert!(reading().unwrap().full);
+
+        // Les bornes tiennent.
+        assert_eq!(update(|s| s.percent = 250).percent, 100);
+        assert_eq!(update(|s| s.percent = 0).percent, 0);
+
+        // Chaque mode retombe sur le résultat réel correspondant.
         update(|s| s.mode = Mode::Docked);
         assert_eq!(reading().unwrap_err(), ProbeError::ControllerDocked);
         update(|s| s.mode = Mode::Disconnected);
         assert_eq!(reading().unwrap_err(), ProbeError::NoDevice);
         update(|s| s.mode = Mode::Connected);
         assert!(reading().is_ok());
-    }
-
-    #[test]
-    fn the_level_stays_within_bounds() {
-        assert_eq!(update(|s| s.percent = 250).percent, 100);
-        assert_eq!(update(|s| s.percent = 0).percent, 0);
-    }
-
-    #[test]
-    fn a_full_charge_is_reported_as_finished() {
-        update(|s| {
-            s.mode = Mode::Connected;
-            s.percent = 100;
-            s.charging = true;
-        });
-        assert!(reading().unwrap().full);
     }
 }
