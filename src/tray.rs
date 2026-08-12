@@ -98,53 +98,63 @@ impl Tray {
         fill(&mut d.szInfo, body);
         unsafe { Shell_NotifyIconW(NIM_MODIFY, &d) };
     }
+}
 
-    /// Menu contextuel. Rend l'identifiant choisi, ou zéro si l'utilisateur a
-    /// cliqué à côté.
-    ///
-    /// `can_chime` est faux quand la manette est éteinte : ses actionneurs ne
-    /// reçoivent alors rien, et proposer une action sans effet vaut moins que
-    /// la montrer indisponible.
-    pub fn popup_menu(&self, hwnd: HWND, autostart_on: bool, can_chime: bool) -> u32 {
-        unsafe {
-            let menu = CreatePopupMenu();
-            if menu.is_null() {
-                return 0;
-            }
-            AppendMenuW(
-                menu,
-                MF_STRING | if can_chime { MF_ENABLED } else { MF_GRAYED },
-                ID_CHIME as usize,
-                wide("Faire sonner la manette").as_ptr(),
-            );
-            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-
-            let check = if autostart_on { MF_CHECKED } else { MF_UNCHECKED };
-            AppendMenuW(
-                menu,
-                MF_STRING | check,
-                ID_TOGGLE_AUTOSTART as usize,
-                wide("Démarrer avec Windows").as_ptr(),
-            );
-            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-            AppendMenuW(menu, MF_STRING, ID_QUIT as usize, wide("Quitter").as_ptr());
-
-            let mut pt = POINT { x: 0, y: 0 };
-            GetCursorPos(&mut pt);
-            // Sans cet appel, le menu ne se referme pas quand on clique ailleurs.
-            SetForegroundWindow(hwnd);
-            let choice = TrackPopupMenu(
-                menu,
-                TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_BOTTOMALIGN,
-                pt.x,
-                pt.y,
-                0,
-                hwnd,
-                std::ptr::null(),
-            );
-            DestroyMenu(menu);
-            choice as u32
+/// Menu contextuel. Rend l'identifiant choisi, ou zéro si l'utilisateur a
+/// cliqué à côté.
+///
+/// `can_chime` est faux quand la manette est éteinte : ses actionneurs ne
+/// reçoivent alors rien, et proposer une action sans effet vaut moins que la
+/// montrer indisponible.
+///
+/// Délibérément une fonction libre, et non une méthode de `Tray`.
+/// `TrackPopupMenu` fait tourner sa propre boucle de messages : tant que le
+/// menu est ouvert, la fenêtre continue de recevoir et de traiter des messages.
+/// Une méthode obligerait l'appelant à tenir un emprunt de l'état de
+/// l'application pendant tout ce temps, et le premier relevé qui arriverait
+/// voudrait le modifier — emprunt mutable sur emprunt partagé, panique, et
+/// arrêt immédiat du processus puisque le profil release abandonne au lieu de
+/// dérouler la pile. Ne rien avoir à emprunter supprime le problème à la
+/// racine plutôt que de le rendre improbable.
+pub fn popup_menu(hwnd: HWND, autostart_on: bool, can_chime: bool) -> u32 {
+    unsafe {
+        let menu = CreatePopupMenu();
+        if menu.is_null() {
+            return 0;
         }
+        AppendMenuW(
+            menu,
+            MF_STRING | if can_chime { MF_ENABLED } else { MF_GRAYED },
+            ID_CHIME as usize,
+            wide("Faire sonner la manette").as_ptr(),
+        );
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+
+        let check = if autostart_on { MF_CHECKED } else { MF_UNCHECKED };
+        AppendMenuW(
+            menu,
+            MF_STRING | check,
+            ID_TOGGLE_AUTOSTART as usize,
+            wide("Démarrer avec Windows").as_ptr(),
+        );
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        AppendMenuW(menu, MF_STRING, ID_QUIT as usize, wide("Quitter").as_ptr());
+
+        let mut pt = POINT { x: 0, y: 0 };
+        GetCursorPos(&mut pt);
+        // Sans cet appel, le menu ne se referme pas quand on clique ailleurs.
+        SetForegroundWindow(hwnd);
+        let choice = TrackPopupMenu(
+            menu,
+            TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_BOTTOMALIGN,
+            pt.x,
+            pt.y,
+            0,
+            hwnd,
+            std::ptr::null(),
+        );
+        DestroyMenu(menu);
+        choice as u32
     }
 }
 

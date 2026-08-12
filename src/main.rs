@@ -120,13 +120,17 @@ fn ensure_reader(hwnd: HWND) {
 
 /// Intègre l'état déposé par le fil de lecture.
 fn on_status(hwnd: HWND) {
-    let Some(status) = STATUS.lock().ok().and_then(|mut s| s.take()) else {
-        return;
-    };
-
     CTX.with(|c| {
-        let mut borrow = c.borrow_mut();
+        // Emprunt prudent. Windows peut nous rappeler depuis une boucle de
+        // messages imbriquée alors que l'état est déjà emprunté ailleurs ;
+        // paniquer y coûterait le processus entier. Le relevé reste alors dans
+        // sa boîte aux lettres et sera traité au message suivant.
+        let Ok(mut borrow) = c.try_borrow_mut() else { return };
         let Some(ctx) = borrow.as_mut() else { return };
+
+        let Some(status) = STATUS.lock().ok().and_then(|mut s| s.take()) else {
+            return;
+        };
 
         let alert = ctx.app.ingest(status);
 
@@ -177,14 +181,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 WM_LBUTTONUP => ensure_reader(hwnd),
                 WM_RBUTTONUP => {
                     let on = autostart::is_enabled();
-                    let choice = CTX.with(|c| {
-                        let borrow = c.borrow();
-                        let Some(ctx) = borrow.as_ref() else { return 0 };
-                        // Seule une manette qui répond peut faire vibrer ses
-                        // actionneurs.
-                        let awake = matches!(ctx.app.icon_state(), IconState::Battery(_));
-                        ctx.tray.popup_menu(hwnd, on, awake)
+                    // On extrait ce dont le menu a besoin, puis on relâche
+                    // l'emprunt AVANT d'ouvrir le menu : `TrackPopupMenu` fait
+                    // tourner sa propre boucle de messages, et un relevé arrivé
+                    // entre-temps voudrait modifier ce que nous tiendrions.
+                    let awake = CTX.with(|c| {
+                        c.borrow()
+                            .as_ref()
+                            .is_some_and(|ctx| matches!(ctx.app.icon_state(), IconState::Battery(_)))
                     });
+                    let choice = tray::popup_menu(hwnd, on, awake);
                     match choice {
                         ID_TOGGLE_AUTOSTART => {
                             autostart::set_enabled(!on);
@@ -212,8 +218,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         // contour de l'icône doit reprendre la couleur qui contraste.
         WM_DPICHANGED | WM_SETTINGCHANGE => {
             CTX.with(|c| {
-                if let Some(ctx) = c.borrow_mut().as_mut() {
-                    repaint(hwnd, ctx);
+                // Même prudence qu'ailleurs : ces messages peuvent survenir
+                // depuis une boucle imbriquée. Un redessin manqué se rattrape
+                // au relevé suivant ; une panique, non.
+                if let Ok(mut borrow) = c.try_borrow_mut() {
+                    if let Some(ctx) = borrow.as_mut() {
+                        repaint(hwnd, ctx);
+                    }
                 }
             });
             DefWindowProcW(hwnd, msg, wp, lp)
