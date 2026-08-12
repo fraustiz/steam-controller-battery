@@ -11,9 +11,23 @@ notification : le remplissage suit le niveau, du vert au rouge en passant par
 l'ambre. Le contour prend le ton qui contraste avec la barre des tâches, clair
 ou sombre, et suit vos changements de thème.
 
-Sans manette connectée, l'icône devient **une prise**, et non une batterie
-vide : une batterie vide se lirait « 0 % », ce qui est un contresens quand on
-n'a aucune mesure.
+L'icône a trois visages :
+
+| Situation | Icône |
+|---|---|
+| Manette connectée | Batterie remplie et colorée selon le niveau, éclair si elle charge |
+| Éteinte **sur son socle** | Batterie atténuée avec éclair : en charge, niveau inconnu |
+| Rien de connecté | Une prise |
+
+Une batterie vide se lirait « 0 % » : c'est pourquoi l'absence de mesure ne se
+dessine jamais ainsi. Et l'état « sur le socle » est atténué plutôt que plein,
+faute de quoi il serait le dessin exact d'une batterie mesurée à 0 % en charge
+— état parfaitement réel, qu'une manette à plat sur son socle produit.
+
+Le clic droit propose **« Faire sonner la manette »** : trois notes montantes
+sur ses actionneurs haptiques, pour la retrouver ou savoir de laquelle il
+s'agit. L'entrée est grisée quand la manette est éteinte, ses actionneurs ne
+recevant alors rien.
 
 - **Survol** — pourcentage, tension, état de charge.
 - **Clic gauche** — relance la lecture si elle s'était arrêtée faute de matériel.
@@ -125,6 +139,27 @@ C'est de là que vient le choix de ne pas faire reposer la détection sur le seu
 octet d'état. Les octets [7] et [9] sont des mesures — tension d'alimentation
 et courant de charge — et une mesure ment moins qu'un code dont on n'a pas
 observé toutes les valeurs.
+
+### Détecter une manette éteinte sur son socle
+
+Le routage du canal `0x01` s'inverse selon l'état de la manette, et c'est ce qui
+rend la détection possible :
+
+| Manette | emplacement (`usage 0x0001`) | contrôle (`usage 0x0002`) |
+|---|---|---|
+| allumée | répond | refusé |
+| éteinte, **sur le socle** | refusé | **répond** |
+| éteinte, à côté du PC hors socle | refusé | refusé |
+| éteinte, éloignée | refusé | refusé |
+
+Les deux derniers cas sont ce qui donne sa valeur au test. Une manette éteinte
+posée à trente centimètres du dongle reste muette : ce n'est donc ni un
+appairage mémorisé, ni de la portée radio. Seul le contact du socle — celui-là
+même qui la recharge — ouvre le canal. Le signal est par conséquent exact :
+il dit « sur le socle », pas « quelque part à proximité ».
+
+Le niveau de charge, lui, reste hors d'atteinte : il ne circule que dans les
+rapports d'entrée, qu'une manette éteinte n'émet pas.
 
 ### Fausses pistes, pour mémoire
 

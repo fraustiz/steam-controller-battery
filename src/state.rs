@@ -12,6 +12,17 @@ pub const ALERT_LEVELS: [u8; 2] = [20, 10];
 /// produire une notification à chaque oscillation.
 const REARM_MARGIN: u8 = 5;
 
+/// Ce que l'icône doit représenter. Trois situations franchement distinctes,
+/// qu'il serait trompeur de confondre : une batterie mesurée, une manette
+/// éteinte sur son socle dont on ne sait rien, et l'absence pure et simple.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IconState {
+    Battery(BatteryStatus),
+    /// Sur le socle, éteinte : en charge, mais niveau hors d'atteinte.
+    Docked,
+    Disconnected,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Alert {
     pub level: u8,
@@ -34,9 +45,20 @@ impl App {
         Self::default()
     }
 
-    /// Ce que l'icône doit représenter : le dernier état connu, ou rien.
+    /// Le dernier relevé retenu. `icon_state` en dit plus long ; celui-ci ne
+    /// sert plus qu'aux vérifications.
+    #[cfg(test)]
     pub fn display(&self) -> Option<&BatteryStatus> {
         self.last_good.as_ref()
+    }
+
+    /// La situation à dessiner.
+    pub fn icon_state(&self) -> IconState {
+        match (&self.last_good, &self.last_error) {
+            (Some(s), _) => IconState::Battery(*s),
+            (None, Some(ProbeError::ControllerDocked)) => IconState::Docked,
+            _ => IconState::Disconnected,
+        }
     }
 
     /// Intègre un relevé et rend la notification à émettre, s'il y a lieu.
@@ -50,7 +72,13 @@ impl App {
             Err(e) => {
                 // Un périphérique qui disparaît invalide l'affichage ; une
                 // simple indisponibilité passagère laisse la dernière valeur.
-                if matches!(e, ProbeError::NoDevice | ProbeError::ControllerOffline) {
+                // Une manette qui décroche emporte avec elle la validité du
+                // dernier relevé, socle compris : posée éteinte, elle charge, et
+                // le pourcentage affiché vieillirait sans qu'on puisse le savoir.
+                if matches!(
+                    e,
+                    ProbeError::NoDevice | ProbeError::ControllerOffline | ProbeError::ControllerDocked
+                ) {
                     self.last_good = None;
                     self.fired = [false; ALERT_LEVELS.len()];
                 }
@@ -169,6 +197,33 @@ mod tests {
         app.ingest(Err(ProbeError::Busy("occupé".into())));
         assert_eq!(app.display().map(|s| s.percent), Some(42));
         assert!(app.tooltip().contains("42"));
+    }
+
+    #[test]
+    fn docking_is_its_own_state() {
+        let mut app = App::new();
+        app.ingest(at(42));
+        assert_eq!(app.icon_state(), IconState::Battery(BatteryStatus {
+            percent: 42,
+            voltage_mv: None,
+            charging: false,
+            full: false,
+        }));
+
+        app.ingest(Err(ProbeError::ControllerDocked));
+        assert_eq!(app.icon_state(), IconState::Docked);
+        // Le pourcentage d'avant ne vaut plus rien : elle charge sans nous le dire.
+        assert!(app.display().is_none());
+        assert!(app.tooltip().contains("socle"), "{}", app.tooltip());
+    }
+
+    #[test]
+    fn an_absent_dongle_is_not_a_dock() {
+        let mut app = App::new();
+        app.ingest(Err(ProbeError::NoDevice));
+        assert_eq!(app.icon_state(), IconState::Disconnected);
+        app.ingest(Err(ProbeError::ControllerOffline));
+        assert_eq!(app.icon_state(), IconState::Disconnected);
     }
 
     #[test]

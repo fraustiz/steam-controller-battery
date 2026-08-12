@@ -45,8 +45,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use hid::{BatteryStatus, ProbeError};
-use state::App;
-use tray::{Tray, ID_QUIT, ID_TOGGLE_AUTOSTART, WM_TRAY};
+use state::{App, IconState};
+use tray::{Tray, ID_CHIME, ID_QUIT, ID_TOGGLE_AUTOSTART, WM_TRAY};
 
 /// Relance de la lecture après un changement de périphérique, le temps que
 /// Windows termine son énumération.
@@ -69,14 +69,12 @@ static READER_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Demande d'arrêt, à la fermeture.
 static READER_STOP: AtomicBool = AtomicBool::new(false);
 
-/// Ce qui détermine le dessin de l'icône. Tant que cela ne change pas, il est
-/// inutile d'en reconstruire une.
-type Appearance = Option<(u8, bool)>;
-
 struct Ctx {
     app: App,
     tray: Tray,
-    drawn: Option<Appearance>,
+    /// Dernier état effectivement dessiné. Tant qu'il ne change pas, il est
+    /// inutile de reconstruire une icône.
+    drawn: Option<IconState>,
 }
 
 thread_local! {
@@ -94,15 +92,12 @@ fn icon_size(hwnd: HWND) -> u32 {
     (16 * dpi / 96).clamp(16, 64)
 }
 
-fn appearance(app: &App) -> Appearance {
-    app.display().map(|s| (s.percent, s.charging))
-}
-
 /// Reconstruit l'icône, que son apparence ait changé ou non.
 fn repaint(hwnd: HWND, ctx: &mut Ctx) {
-    let hicon = icon::render(ctx.app.display(), icon_size(hwnd));
+    let state = ctx.app.icon_state();
+    let hicon = icon::render(state, icon_size(hwnd));
     ctx.tray.set(hicon, &ctx.app.tooltip());
-    ctx.drawn = Some(appearance(&ctx.app));
+    ctx.drawn = Some(state);
 }
 
 /// Démarre le fil de lecture s'il n'y en a pas déjà un.
@@ -138,7 +133,7 @@ fn on_status(hwnd: HWND) {
         // L'infobulle suit chaque relevé ; l'icône, seulement les changements
         // visibles. Sans cette distinction on reconstruirait une icône toutes
         // les trois secondes et demie pour rien.
-        if ctx.drawn != Some(appearance(&ctx.app)) {
+        if ctx.drawn != Some(ctx.app.icon_state()) {
             repaint(hwnd, ctx);
         } else {
             let tip = ctx.app.tooltip();
@@ -183,14 +178,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 WM_RBUTTONUP => {
                     let on = autostart::is_enabled();
                     let choice = CTX.with(|c| {
-                        c.borrow()
-                            .as_ref()
-                            .map(|ctx| ctx.tray.popup_menu(hwnd, on))
-                            .unwrap_or(0)
+                        let borrow = c.borrow();
+                        let Some(ctx) = borrow.as_ref() else { return 0 };
+                        // Seule une manette qui répond peut faire vibrer ses
+                        // actionneurs.
+                        let awake = matches!(ctx.app.icon_state(), IconState::Battery(_));
+                        ctx.tray.popup_menu(hwnd, on, awake)
                     });
                     match choice {
                         ID_TOGGLE_AUTOSTART => {
                             autostart::set_enabled(!on);
+                        }
+                        ID_CHIME => {
+                            // Le carillon dure deux secondes : il n'a rien à
+                            // faire sur le fil qui traite les messages.
+                            std::thread::spawn(|| {
+                                let _ = hid::play_locator_chime();
+                            });
                         }
                         ID_QUIT => {
                             READER_STOP.store(true, Ordering::SeqCst);

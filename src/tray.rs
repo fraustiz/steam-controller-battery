@@ -9,8 +9,8 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos, SetForegroundWindow,
-    TrackPopupMenu, HICON, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, TPM_BOTTOMALIGN,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, HICON, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_SEPARATOR, MF_STRING,
+    MF_UNCHECKED, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
 };
 
 /// Message que Windows renvoie à notre fenêtre pour les clics sur l'icône.
@@ -18,6 +18,7 @@ pub const WM_TRAY: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 1
 
 pub const ID_TOGGLE_AUTOSTART: u32 = 1;
 pub const ID_QUIT: u32 = 2;
+pub const ID_CHIME: u32 = 3;
 
 fn wide(s: &str) -> Vec<u16> {
     std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
@@ -100,12 +101,24 @@ impl Tray {
 
     /// Menu contextuel. Rend l'identifiant choisi, ou zéro si l'utilisateur a
     /// cliqué à côté.
-    pub fn popup_menu(&self, hwnd: HWND, autostart_on: bool) -> u32 {
+    ///
+    /// `can_chime` est faux quand la manette est éteinte : ses actionneurs ne
+    /// reçoivent alors rien, et proposer une action sans effet vaut moins que
+    /// la montrer indisponible.
+    pub fn popup_menu(&self, hwnd: HWND, autostart_on: bool, can_chime: bool) -> u32 {
         unsafe {
             let menu = CreatePopupMenu();
             if menu.is_null() {
                 return 0;
             }
+            AppendMenuW(
+                menu,
+                MF_STRING | if can_chime { MF_ENABLED } else { MF_GRAYED },
+                ID_CHIME as usize,
+                wide("Faire sonner la manette").as_ptr(),
+            );
+            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+
             let check = if autostart_on { MF_CHECKED } else { MF_UNCHECKED };
             AppendMenuW(
                 menu,

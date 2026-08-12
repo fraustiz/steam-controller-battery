@@ -14,6 +14,10 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
 
 use crate::hid::BatteryStatus;
+use crate::state::IconState;
+
+/// Opacité du dessin lorsque le niveau est inconnu.
+const DIM_UNKNOWN: f32 = 0.5;
 
 /// Racine du nombre d'échantillons par pixel. Quatre par quatre suffisent à
 /// lisser un contour d'un pixel d'épaisseur.
@@ -273,24 +277,34 @@ fn erase(dst: &mut u32, amount: f32) {
 
 /// Dessine l'icône dans un tampon de pixels. Séparé de toute création d'objet
 /// GDI, donc vérifiable directement.
-pub fn draw(px: &mut [u32], size: u32, status: Option<&BatteryStatus>) {
-    draw_themed(px, size, status, outline_color())
+pub fn draw(px: &mut [u32], size: u32, state: IconState) {
+    draw_themed(px, size, state, outline_color())
 }
 
 /// Variante à contour imposé, pour pouvoir contrôler le rendu sur les deux
 /// thèmes sans dépendre de celui de la machine.
-pub fn draw_themed(
-    px: &mut [u32],
-    size: u32,
-    status: Option<&BatteryStatus>,
-    outline: (u8, u8, u8),
-) {
-    match status {
-        Some(s) => draw_battery(px, size, s, outline),
+pub fn draw_themed(px: &mut [u32], size: u32, state: IconState, outline: (u8, u8, u8)) {
+    match state {
+        IconState::Battery(s) => draw_battery(px, size, &s, outline),
+        // Sur le socle et éteinte : elle charge, mais son niveau est hors
+        // d'atteinte. La coque et l'éclair disent exactement cela — en charge,
+        // niveau inconnu — là où un remplissage inventerait une mesure.
+        IconState::Docked => {
+            let g = Geometry::new(size as f32);
+            draw_shell(px, size, &g, outline);
+            draw_bolt(px, size, &g, outline);
+            // Atténuation. Sans elle, ce dessin serait rigoureusement celui
+            // d'une batterie mesurée à 0 % en charge — état parfaitement réel,
+            // qu'une manette à plat posée sur son socle produit. Le ton éteint
+            // dit « je ne sais pas », là où le plein dirait « je sais, et c'est
+            // vide ».
+            for p in px.iter_mut() {
+                erase(p, 1.0 - DIM_UNKNOWN);
+            }
+        }
         // Sans relevé, dessiner une batterie vide serait un contresens : on la
-        // lirait comme une batterie à plat. Une prise dit « pas de liaison »,
-        // ce qui est la vérité.
-        None => draw_plug(px, size, outline),
+        // lirait comme une batterie à plat. Une prise dit « pas de liaison ».
+        IconState::Disconnected => draw_plug(px, size, outline),
     }
 }
 
@@ -320,51 +334,57 @@ fn draw_plug(px: &mut [u32], size: u32, color: (u8, u8, u8)) {
     }
 }
 
+/// Le contour du corps et son téton.
+fn draw_shell(px: &mut [u32], size: u32, g: &Geometry, outline: (u8, u8, u8)) {
+    for y in 0..size {
+        for x in 0..size {
+            let c = coverage(x, y, |fx, fy| {
+                (in_rounded_rect(fx, fy, g.body, g.radius)
+                    && !in_rounded_rect(fx, fy, g.inner, g.radius * 0.5))
+                    || in_rounded_rect(fx, fy, g.nub, g.radius * 0.4)
+            });
+            blend(&mut px[(y * size + x) as usize], outline, c);
+        }
+    }
+}
+
+/// L'éclair, en deux temps : on creuse d'abord un liseré, puis on trace dedans.
+/// Le vide ainsi dégagé le détache du remplissage quelle qu'en soit la couleur.
+fn draw_bolt(px: &mut [u32], size: u32, g: &Geometry, outline: (u8, u8, u8)) {
+    let bolt = bolt_points(g);
+    let halo = g.stroke * 0.85;
+    for y in 0..size {
+        for x in 0..size {
+            let i = (y * size + x) as usize;
+            erase(&mut px[i], coverage(x, y, |fx, fy| near_polygon(fx, fy, &bolt, halo)));
+            let c = coverage(x, y, |fx, fy| in_polygon(fx, fy, &bolt));
+            blend(&mut px[i], outline, c);
+        }
+    }
+}
+
 fn draw_battery(px: &mut [u32], size: u32, status: &BatteryStatus, outline: (u8, u8, u8)) {
     let g = Geometry::new(size as f32);
     let fill_color = level_color(status.percent);
     let fill_top = g.fill_top(status.percent);
 
+    draw_shell(px, size, &g, outline);
     for y in 0..size {
         for x in 0..size {
-            let i = (y * size + x) as usize;
-
-            // Contour : le corps plein moins son intérieur, plus le téton.
-            let shell = coverage(x, y, |fx, fy| {
-                (in_rounded_rect(fx, fy, g.body, g.radius)
-                    && !in_rounded_rect(fx, fy, g.inner, g.radius * 0.5))
-                    || in_rounded_rect(fx, fy, g.nub, g.radius * 0.4)
-            });
-            blend(&mut px[i], outline, shell);
-
-            // Remplissage, depuis le bas.
             let fill = coverage(x, y, |fx, fy| {
                 fy >= fill_top && in_rounded_rect(fx, fy, g.inner, g.radius * 0.5)
             });
-            blend(&mut px[i], fill_color, fill);
+            blend(&mut px[(y * size + x) as usize], fill_color, fill);
         }
     }
-
-    // L'éclair se pose par-dessus en deux temps : on creuse d'abord une forme
-    // légèrement dilatée, puis on trace l'éclair dedans. Le liseré vide ainsi
-    // dégagé le détache du remplissage quelle que soit la couleur de celui-ci.
     if status.charging {
-        let bolt = bolt_points(&g);
-        let halo_width = g.stroke * 0.85;
-        for y in 0..size {
-            for x in 0..size {
-                let i = (y * size + x) as usize;
-                erase(&mut px[i], coverage(x, y, |fx, fy| near_polygon(fx, fy, &bolt, halo_width)));
-                let c = coverage(x, y, |fx, fy| in_polygon(fx, fy, &bolt));
-                blend(&mut px[i], outline, c);
-            }
-        }
+        draw_bolt(px, size, &g, outline);
     }
 }
 
 /// Construit l'icône. Le résultat appartient à l'appelant, qui doit la libérer
 /// par `DestroyIcon`.
-pub fn render(status: Option<&BatteryStatus>, size: u32) -> HICON {
+pub fn render(state: IconState, size: u32) -> HICON {
     let size = size.clamp(16, 64);
     let n = (size * size) as usize;
 
@@ -385,7 +405,7 @@ pub fn render(status: Option<&BatteryStatus>, size: u32) -> HICON {
 
         let px = std::slice::from_raw_parts_mut(bits as *mut u32, n);
         px.fill(0);
-        draw(px, size, status);
+        draw(px, size, state);
 
         // Le masque monochrome n'est pas consulté pour une icône 32 bits avec
         // couche alpha, mais `CreateIconIndirect` en exige un.
@@ -417,10 +437,14 @@ mod tests {
         BatteryStatus { percent, voltage_mv: None, charging, full: false }
     }
 
-    fn buffer(size: u32, status: Option<&BatteryStatus>) -> Vec<u32> {
+    fn buffer(size: u32, state: IconState) -> Vec<u32> {
         let mut px = vec![0u32; (size * size) as usize];
-        draw(&mut px, size, status);
+        draw(&mut px, size, state);
         px
+    }
+
+    fn battery(percent: u8, charging: bool) -> IconState {
+        IconState::Battery(at(percent, charging))
     }
 
     fn opaque_pixels(px: &[u32]) -> usize {
@@ -478,7 +502,7 @@ mod tests {
     #[test]
     fn the_drawing_stays_inside_the_canvas_at_every_size() {
         for size in [16u32, 20, 24, 32, 48, 64] {
-            let px = buffer(size, Some(&at(50, false)));
+            let px = buffer(size, battery(50, false));
             assert_eq!(px.len(), (size * size) as usize);
             // Le pourtour du carré doit rester vide : rien ne doit toucher le bord.
             for i in 0..size {
@@ -496,17 +520,45 @@ mod tests {
 
     #[test]
     fn a_fuller_battery_paints_more_pixels() {
-        let empty = opaque_pixels(&buffer(32, Some(&at(0, false))));
-        let half = opaque_pixels(&buffer(32, Some(&at(50, false))));
-        let full = opaque_pixels(&buffer(32, Some(&at(100, false))));
+        let empty = opaque_pixels(&buffer(32, battery(0, false)));
+        let half = opaque_pixels(&buffer(32, battery(50, false)));
+        let full = opaque_pixels(&buffer(32, battery(100, false)));
         assert!(half > empty, "50 % doit peindre plus que 0 %");
         assert!(full > half, "100 % doit peindre plus que 50 %");
     }
 
     #[test]
+    fn the_three_states_are_visually_distinct() {
+        // Confondre « en charge sur le socle » avec « rien de connecté » ou
+        // avec une batterie mesurée annulerait tout l'intérêt de les avoir
+        // distingués dans le code.
+        let docked = buffer(32, IconState::Docked);
+        let absent = buffer(32, IconState::Disconnected);
+        let measured = buffer(32, battery(0, true));
+        assert_ne!(docked, absent);
+        assert_ne!(docked, measured);
+        assert_ne!(absent, measured);
+    }
+
+    #[test]
+    fn the_docked_icon_is_dimmer_than_a_measured_one() {
+        // Le cas piégeux : une batterie mesurée à 0 % en charge dessine elle
+        // aussi une coque et un éclair, sans remplissage. Seule l'atténuation
+        // les sépare.
+        let docked = buffer(32, IconState::Docked);
+        let flat_charging = buffer(32, battery(0, true));
+        assert_ne!(docked, flat_charging);
+
+        let alpha = |px: &[u32]| px.iter().map(|p| (p >> 24) & 0xFF).sum::<u32>();
+        let (a, b) = (alpha(&docked), alpha(&flat_charging));
+        assert!(a < b, "l'état inconnu doit être plus discret : {a} contre {b}");
+        assert!(a > b / 4, "atténué, mais pas au point de disparaître");
+    }
+
+    #[test]
     fn a_disconnected_controller_draws_a_plug_not_an_empty_battery() {
-        let disconnected = buffer(32, None);
-        let flat = buffer(32, Some(&at(0, false)));
+        let disconnected = buffer(32, IconState::Disconnected);
+        let flat = buffer(32, battery(0, false));
         assert!(opaque_pixels(&disconnected) > 0, "il faut bien dessiner quelque chose");
         // Le point de tout ceci : une batterie vide se lirait « 0 % », ce qui
         // est un contresens quand on n'a aucune mesure.
@@ -525,7 +577,7 @@ mod tests {
         // Une prise dont les broches flotteraient loin du corps se lirait comme
         // trois taches sans rapport. On vérifie qu'aucune colonne peinte n'est
         // isolée : le dessin doit tenir d'un seul tenant horizontalement.
-        let px = buffer(32, None);
+        let px = buffer(32, IconState::Disconnected);
         let painted: Vec<usize> = (0..32)
             .filter(|&x| (0..32).any(|y| (px[y * 32 + x] >> 24) & 0xFF > 40))
             .collect();
@@ -537,15 +589,15 @@ mod tests {
 
     #[test]
     fn charging_adds_the_bolt() {
-        let plain = buffer(32, Some(&at(50, false)));
-        let charging = buffer(32, Some(&at(50, true)));
+        let plain = buffer(32, battery(50, false));
+        let charging = buffer(32, battery(50, true));
         assert_ne!(plain, charging, "l'éclair doit modifier le dessin");
     }
 
     #[test]
     fn every_pixel_is_either_transparent_or_coloured() {
         // Un pixel opaque totalement noir trahirait une composition ratée.
-        for p in buffer(32, Some(&at(70, true))) {
+        for p in buffer(32, battery(70, true)) {
             let (a, rgb) = (p >> 24, p & 0x00FF_FFFF);
             assert!(a == 0 || rgb != 0, "pixel opaque sans couleur");
         }
@@ -567,14 +619,15 @@ mod tests {
     #[test]
     #[ignore = "génère un fichier à inspecter à l'œil"]
     fn render_preview_sheet() {
-        let cases: &[(&str, Option<BatteryStatus>)] = &[
-            ("100", Some(at(100, false))),
-            ("70", Some(at(70, false))),
-            ("45", Some(at(45, false))),
-            ("15", Some(at(15, false))),
-            ("5", Some(at(5, false))),
-            ("charge", Some(at(60, true))),
-            ("inconnu", None),
+        let cases: &[(&str, IconState)] = &[
+            ("100", battery(100, false)),
+            ("70", battery(70, false)),
+            ("45", battery(45, false)),
+            ("15", battery(15, false)),
+            ("5", battery(5, false)),
+            ("charge", battery(60, true)),
+            ("socle", IconState::Docked),
+            ("absente", IconState::Disconnected),
         ];
         // Fond de barre des tâches et contour associé, pour contrôler les deux
         // thèmes sans dépendre de celui de la machine.
@@ -599,9 +652,9 @@ mod tests {
                     img[(y * w + x) as usize] = bg;
                 }
             }
-            for (ci, (_, status)) in cases.iter().enumerate() {
+            for (ci, (_, state)) in cases.iter().enumerate() {
                 let mut px = vec![0u32; (ICON * ICON) as usize];
-                draw_themed(&mut px, ICON, status.as_ref(), outline);
+                draw_themed(&mut px, ICON, *state, outline);
                 let ox = ci as u32 * cell + PAD;
 
                 // Version agrandie, pour juger le tracé.

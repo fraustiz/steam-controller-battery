@@ -100,6 +100,11 @@ pub enum ProbeError {
     NoDevice,
     /// Le dongle est là, mais la manette est éteinte, endormie ou hors de portée.
     ControllerOffline,
+    /// La manette est éteinte, mais elle répond encore au dongle : elle est
+    /// donc à portée immédiate, c'est-à-dire posée sur son socle. Son niveau de
+    /// charge, lui, est hors d'atteinte — il ne circule que dans les rapports
+    /// d'entrée, qu'une manette éteinte n'émet pas.
+    ControllerDocked,
     /// Le périphérique existe mais refuse de s'ouvrir.
     Busy(String),
     /// `hidapi` n'a pas pu s'initialiser.
@@ -112,6 +117,7 @@ impl ProbeError {
         match self {
             Self::NoDevice => "Aucun dongle Steam détecté".into(),
             Self::ControllerOffline => "Manette éteinte ou hors de portée".into(),
+            Self::ControllerDocked => "Manette éteinte sur son socle — niveau inconnu".into(),
             Self::Busy(_) => "Manette occupée par un autre logiciel".into(),
             Self::HidUnavailable(e) => format!("Accès HID impossible : {e}"),
         }
@@ -234,10 +240,150 @@ pub fn probe() -> Result<BatteryStatus, ProbeError> {
     read_power_report(&dev).ok_or(ProbeError::ControllerOffline)
 }
 
+/// Canal de commande visant la manette dans les rapports de fonctionnalité.
+const CH_CONTROLLER: u8 = 0x01;
+/// Lecture des attributs. Sert ici de simple « es-tu là ? ».
+const CMD_GET_ATTRIBUTES: u8 = 0x83;
+/// Longueur d'un rapport de fonctionnalité, identifiant compris.
+const FEATURE_LEN: usize = 64;
+
+/// La manette est-elle éteinte et posée sur son socle ?
+///
+/// Le routage du canal 0x01 s'inverse selon l'état de la manette :
+///
+/// | | emplacement (usage 0x0001) | contrôle (usage 0x0002) |
+/// |---|---|---|
+/// | allumée | répond | refusé |
+/// | éteinte, sur le socle | refusé | **répond** |
+/// | éteinte, à côté du PC hors socle | refusé | refusé |
+/// | éteinte, éloignée | refusé | refusé |
+///
+/// Les deux derniers cas sont ce qui donne sa valeur au test. Une manette
+/// éteinte posée à trente centimètres du dongle reste muette : ce n'est donc ni
+/// un appairage mémorisé, ni de la simple portée radio. Seul le contact du
+/// socle — celui-là même qui la recharge — ouvre le canal.
+///
+/// Le signal est par conséquent exact et non approximatif : il dit « sur le
+/// socle », pas « quelque part à proximité ».
+fn controller_answers_while_off(api: &hidapi::HidApi) -> bool {
+    let Some(info) = api
+        .device_list()
+        .find(|i| i.vendor_id() == VALVE_VID && i.usage_page() == USAGE_PAGE_VENDOR && i.usage() == USAGE_CONTROL)
+        .cloned()
+    else {
+        return false;
+    };
+    let Ok(dev) = info.open_device(api) else {
+        return false;
+    };
+
+    let mut out = vec![0u8; FEATURE_LEN];
+    out[0] = CH_CONTROLLER;
+    out[1] = CMD_GET_ATTRIBUTES;
+    if dev.send_feature_report(&out).is_err() {
+        return false;
+    }
+
+    // Les premières relectures échouent régulièrement : la réponse fait un
+    // aller-retour radio et n'est pas prête tout de suite.
+    for _ in 0..20 {
+        let mut b = vec![0u8; FEATURE_LEN];
+        b[0] = CH_CONTROLLER;
+        if let Ok(n) = dev.get_feature_report(&mut b) {
+            if n > 3 && b[1] == CMD_GET_ATTRIBUTES {
+                let len = (b[2] as usize).min(n - 3);
+                return b[3..3 + len]
+                    .chunks_exact(5)
+                    .any(|c| c[0] == 0x01 && u16::from_le_bytes([c[1], c[2]]) == PID_CONTROLLER);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+/// Interface de contrôle du dongle.
+const USAGE_CONTROL: u16 = 0x0002;
+
 /// Délai au-delà duquel un silence signifie que la manette a décroché.
 const SILENCE_TIMEOUT: Duration = Duration::from_secs(12);
 /// Attente entre deux tentatives quand le dongle est là mais pas la manette.
 const RETRY_DELAY: Duration = Duration::from_secs(5);
+
+/// Rapport de sortie pilotant les actionneurs haptiques.
+const RPT_HAPTIC: u8 = 0x83;
+
+/// Actionneurs utilisés pour le carillon. Les deux premiers sont sous les
+/// trackpads, les suivants sont les moteurs de vibration : les faire sonner
+/// ensemble porte plus loin qu'un seul.
+const LOCATOR_ACTUATORS: [u8; 4] = [0, 1, 3, 4];
+
+/// Amplitude maximale. L'octet est signé : 127 est le plus fort.
+const LOCATOR_GAIN: u8 = 127;
+
+/// Démarre une note sur un actionneur.
+///
+/// Le découpage de la fréquence en deux octets se fait modulo 255 et non 256.
+/// C'est l'arithmétique du projet d'origine, vérifiée sur le matériel ; la
+/// « corriger » en décalage de bits produit une note fausse.
+fn haptic_on(actuator: u8, hz: u16) -> [u8; 64] {
+    let mut b = [0u8; 64];
+    b[0] = RPT_HAPTIC;
+    b[1] = actuator;
+    b[2] = LOCATOR_GAIN;
+    b[3] = (hz % 0xFF) as u8;
+    b[4] = (hz / 0xFF) as u8;
+    b[5] = 0xFF;
+    b[6] = 0x7F;
+    b
+}
+
+fn haptic_off(actuator: u8) -> [u8; 64] {
+    let mut b = [0u8; 64];
+    b[0] = RPT_HAPTIC;
+    b[1] = actuator;
+    b[2] = 0x80;
+    b[6] = 0x80;
+    b
+}
+
+/// Fait sonner la manette, pour la retrouver ou savoir de laquelle il s'agit.
+///
+/// Trois notes ascendantes, répétées trois fois : une suite qui monte se
+/// distingue d'une vibration de jeu, et se localise mieux à l'oreille qu'un
+/// bourdonnement continu.
+///
+/// Exige une manette allumée : les actionneurs d'une manette éteinte ne
+/// reçoivent rien, même posée sur son socle.
+pub fn play_locator_chime() -> Result<(), ProbeError> {
+    /// La, ré, sol de l'octave supérieure. Assez aigu pour porter.
+    const NOTES: [u16; 3] = [880, 1174, 1568];
+    const NOTE_MS: u64 = 130;
+    const GAP_MS: u64 = 40;
+
+    let api = hidapi::HidApi::new().map_err(|e| ProbeError::HidUnavailable(e.to_string()))?;
+    let (dev, _) = open_emitting_slot(&api)?;
+
+    for _ in 0..3 {
+        for hz in NOTES {
+            for a in LOCATOR_ACTUATORS {
+                let _ = dev.write(&haptic_on(a, hz));
+            }
+            std::thread::sleep(Duration::from_millis(NOTE_MS));
+        }
+        for a in LOCATOR_ACTUATORS {
+            let _ = dev.write(&haptic_off(a));
+        }
+        std::thread::sleep(Duration::from_millis(GAP_MS * 4));
+    }
+
+    // Silence garanti même si une écriture s'est perdue : une manette laissée
+    // en vibration continue serait pire que pas de carillon du tout.
+    for a in LOCATOR_ACTUATORS {
+        let _ = dev.write(&haptic_off(a));
+    }
+    Ok(())
+}
 
 /// Écoute les rapports d'alimentation au fil de l'eau et les transmet à mesure.
 ///
@@ -288,6 +434,18 @@ pub fn run_reader(
                 // Plus rien de branché : inutile de garder un fil en vie.
                 on_status(Err(ProbeError::NoDevice));
                 return;
+            }
+            Err(ProbeError::ControllerOffline) => {
+                // Muette, mais peut-être seulement éteinte sur son socle : le
+                // canal du socle répond là où la radio s'est tue.
+                let docked = controller_answers_while_off(&api);
+                on_status(Err(if docked {
+                    ProbeError::ControllerDocked
+                } else {
+                    ProbeError::ControllerOffline
+                }));
+                nap(should_stop, RETRY_DELAY);
+                continue;
             }
             Err(e) => {
                 on_status(Err(e));
@@ -448,6 +606,46 @@ mod tests {
         let mut padded = OFF_PUCK.to_vec();
         padded.extend_from_slice(&[0xB6, 0x7A, 0xFE, 0x00, 0x00]);
         assert_eq!(parse_power_report(&padded).unwrap().percent, 94);
+    }
+
+    #[test]
+    fn the_chime_note_splits_frequency_the_way_the_hardware_expects() {
+        // Le découpage se fait modulo 255, pas 256. Une note à 1174 Hz donne
+        // 1174 % 255 = 154 et 1174 / 255 = 4 ; un découpage en octets aurait
+        // donné 150 et 4, et la manette jouerait faux.
+        let r = haptic_on(1, 1174);
+        assert_eq!(r[0], RPT_HAPTIC);
+        assert_eq!(r[1], 1);
+        assert_eq!(r[2], LOCATOR_GAIN);
+        assert_eq!(r[3], 154);
+        assert_eq!(r[4], 4);
+        assert_ne!(r[3], (1174 & 0xFF) as u8, "découpage en octets : note fausse");
+        assert_eq!(r[5], 0xFF);
+        assert_eq!(r[6], 0x7F);
+    }
+
+    #[test]
+    fn the_chime_silences_every_actuator_it_touches() {
+        for a in LOCATOR_ACTUATORS {
+            let off = haptic_off(a);
+            assert_eq!(off[0], RPT_HAPTIC);
+            assert_eq!(off[1], a);
+            assert_eq!(off[2], 0x80);
+            assert_eq!(off[6], 0x80);
+            // Aucune fréquence résiduelle : la note doit vraiment s'arrêter.
+            assert_eq!(off[3], 0);
+            assert_eq!(off[4], 0);
+        }
+    }
+
+    #[test]
+    fn a_docked_controller_is_not_reported_as_absent() {
+        // Les trois situations doivent rester distinctes jusque dans l'infobulle.
+        assert_ne!(
+            ProbeError::ControllerDocked.tooltip(),
+            ProbeError::ControllerOffline.tooltip()
+        );
+        assert!(ProbeError::ControllerDocked.tooltip().contains("socle"));
     }
 
     /// Vérification sur matériel réel :
