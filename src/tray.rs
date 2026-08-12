@@ -9,7 +9,7 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos, SetForegroundWindow,
-    TrackPopupMenu, HICON, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_SEPARATOR, MF_STRING,
+    TrackPopupMenu, HICON, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
     MF_UNCHECKED, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
 };
 
@@ -20,6 +20,26 @@ pub const ID_TOGGLE_AUTOSTART: u32 = 1;
 pub const ID_QUIT: u32 = 2;
 pub const ID_CHIME: u32 = 3;
 pub const ID_TOGGLE_PERCENT: u32 = 4;
+
+/// Entrées du mode de simulation. Numérotées loin des autres pour qu'aucune
+/// collision ne soit possible si le menu s'étoffe.
+pub const ID_SIM_CHARGING: u32 = 900;
+pub const ID_SIM_CONNECTED: u32 = 901;
+pub const ID_SIM_DOCKED: u32 = 902;
+pub const ID_SIM_DISCONNECTED: u32 = 903;
+pub const ID_SIM_MINUS: u32 = 904;
+pub const ID_SIM_PLUS: u32 = 905;
+/// Un niveau fixe : l'identifiant vaut cette base plus le pourcentage.
+pub const ID_SIM_LEVEL_BASE: u32 = 1000;
+
+/// Ce que le menu doit refléter de l'état simulé.
+#[derive(Debug, Clone, Copy)]
+pub struct SimMenu {
+    pub percent: u8,
+    pub charging: bool,
+    pub connected: bool,
+    pub docked: bool,
+}
 
 fn wide(s: &str) -> Vec<u16> {
     std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
@@ -117,7 +137,13 @@ impl Tray {
 /// arrêt immédiat du processus puisque le profil release abandonne au lieu de
 /// dérouler la pile. Ne rien avoir à emprunter supprime le problème à la
 /// racine plutôt que de le rendre improbable.
-pub fn popup_menu(hwnd: HWND, autostart_on: bool, can_chime: bool, percent_on: bool) -> u32 {
+pub fn popup_menu(
+    hwnd: HWND,
+    autostart_on: bool,
+    can_chime: bool,
+    percent_on: bool,
+    sim: Option<SimMenu>,
+) -> u32 {
     unsafe {
         let menu = CreatePopupMenu();
         if menu.is_null() {
@@ -143,6 +169,41 @@ pub fn popup_menu(hwnd: HWND, autostart_on: bool, can_chime: bool, percent_on: b
             ID_TOGGLE_AUTOSTART as usize,
             wide("Démarrer avec Windows").as_ptr(),
         );
+        // Simulation : n'existe que si le paramètre de lancement est là.
+        if let Some(sim) = sim {
+            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+
+            let levels = CreatePopupMenu();
+            for step in [0u8, 5, 10, 15, 20, 30, 40, 50, 60, 70, 80, 90, 100] {
+                let mark = if sim.percent == step { MF_CHECKED } else { MF_UNCHECKED };
+                AppendMenuW(
+                    levels,
+                    MF_STRING | mark,
+                    (ID_SIM_LEVEL_BASE + step as u32) as usize,
+                    wide(&format!("{step} %")).as_ptr(),
+                );
+            }
+            AppendMenuW(levels, MF_SEPARATOR, 0, std::ptr::null());
+            AppendMenuW(levels, MF_STRING, ID_SIM_MINUS as usize, wide("Un point de moins").as_ptr());
+            AppendMenuW(levels, MF_STRING, ID_SIM_PLUS as usize, wide("Un point de plus").as_ptr());
+            AppendMenuW(
+                menu,
+                MF_STRING | MF_POPUP,
+                levels as usize,
+                wide(&format!("Simuler le niveau  ({} %)", sim.percent)).as_ptr(),
+            );
+
+            let flag = |on: bool| if on { MF_CHECKED } else { MF_UNCHECKED };
+            AppendMenuW(menu, MF_STRING | flag(sim.charging), ID_SIM_CHARGING as usize,
+                wide("Simuler la charge").as_ptr());
+            AppendMenuW(menu, MF_STRING | flag(sim.connected), ID_SIM_CONNECTED as usize,
+                wide("Simuler : connectée").as_ptr());
+            AppendMenuW(menu, MF_STRING | flag(sim.docked), ID_SIM_DOCKED as usize,
+                wide("Simuler : éteinte sur le socle").as_ptr());
+            AppendMenuW(menu, MF_STRING | flag(!sim.connected && !sim.docked),
+                ID_SIM_DISCONNECTED as usize, wide("Simuler : rien de connecté").as_ptr());
+        }
+
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(menu, MF_STRING, ID_QUIT as usize, wide("Quitter").as_ptr());
 

@@ -21,6 +21,7 @@
 #![windows_subsystem = "windows"]
 
 mod autostart;
+mod debug;
 mod hid;
 mod icon;
 mod icons;
@@ -48,7 +49,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use hid::{BatteryStatus, ProbeError};
 use state::{App, IconState};
-use tray::{Tray, ID_CHIME, ID_QUIT, ID_TOGGLE_AUTOSTART, ID_TOGGLE_PERCENT, WM_TRAY};
+use tray::{
+    SimMenu, Tray, ID_CHIME, ID_QUIT, ID_SIM_CHARGING, ID_SIM_CONNECTED, ID_SIM_DISCONNECTED,
+    ID_SIM_DOCKED, ID_SIM_LEVEL_BASE, ID_SIM_MINUS, ID_SIM_PLUS, ID_TOGGLE_AUTOSTART,
+    ID_TOGGLE_PERCENT, WM_TRAY,
+};
 
 /// Relance de la lecture après un changement de périphérique, le temps que
 /// Windows termine son énumération.
@@ -102,12 +107,39 @@ fn repaint(hwnd: HWND, ctx: &mut Ctx) {
     let state = ctx.app.icon_state();
     let with_percent = settings::show_percent();
     let hicon = icon::render(state, icon_size(hwnd), with_percent);
-    ctx.tray.set(hicon, &ctx.app.tooltip());
+    ctx.tray.set(hicon, &tooltip(ctx));
     ctx.drawn = Some((state, with_percent));
+}
+
+/// L'infobulle, précédée de sa mention lorsqu'on simule. Sans elle on
+/// finirait par prendre une valeur inventée pour une mesure — précisément
+/// l'erreur que ce mode doit aider à débusquer.
+fn tooltip(ctx: &Ctx) -> String {
+    let t = ctx.app.tooltip();
+    if debug::enabled() {
+        format!("{}{t}", debug::TOOLTIP_PREFIX)
+    } else {
+        t
+    }
+}
+
+/// Rejoue l'état simulé et rafraîchit l'affichage.
+fn apply_simulation(hwnd: HWND) {
+    let reading = debug::reading();
+    if let Ok(mut slot) = STATUS.lock() {
+        *slot = Some(reading);
+    }
+    on_status(hwnd);
 }
 
 /// Démarre le fil de lecture s'il n'y en a pas déjà un.
 fn ensure_reader(hwnd: HWND) {
+    // En simulation, le matériel n'est jamais interrogé : le fil de lecture
+    // écraserait les valeurs choisies dans le menu.
+    if debug::enabled() {
+        apply_simulation(hwnd);
+        return;
+    }
     if READER_ACTIVE.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -146,7 +178,7 @@ fn on_status(hwnd: HWND) {
         if ctx.drawn != Some((ctx.app.icon_state(), settings::show_percent())) {
             repaint(hwnd, ctx);
         } else {
-            let tip = ctx.app.tooltip();
+            let tip = tooltip(ctx);
             ctx.tray.set_tooltip(&tip);
         }
 
@@ -197,7 +229,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                             .is_some_and(|ctx| matches!(ctx.app.icon_state(), IconState::Battery(_)))
                     });
                     let percent_on = settings::show_percent();
-                    let choice = tray::popup_menu(hwnd, on, awake, percent_on);
+                    let sim = debug::enabled().then(|| {
+                        let s = debug::get();
+                        SimMenu {
+                            percent: s.percent,
+                            charging: s.charging,
+                            connected: s.mode == debug::Mode::Connected,
+                            docked: s.mode == debug::Mode::Docked,
+                        }
+                    });
+                    let choice = tray::popup_menu(hwnd, on, awake, percent_on, sim);
                     match choice {
                         ID_TOGGLE_AUTOSTART => {
                             autostart::set_enabled(!on);
@@ -224,6 +265,43 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         ID_QUIT => {
                             READER_STOP.store(true, Ordering::SeqCst);
                             PostQuitMessage(0);
+                        }
+                        other if debug::enabled() => {
+                            let touched = match other {
+                                ID_SIM_CHARGING => {
+                                    debug::update(|s| s.charging = !s.charging);
+                                    true
+                                }
+                                ID_SIM_CONNECTED => {
+                                    debug::update(|s| s.mode = debug::Mode::Connected);
+                                    true
+                                }
+                                ID_SIM_DOCKED => {
+                                    debug::update(|s| s.mode = debug::Mode::Docked);
+                                    true
+                                }
+                                ID_SIM_DISCONNECTED => {
+                                    debug::update(|s| s.mode = debug::Mode::Disconnected);
+                                    true
+                                }
+                                ID_SIM_MINUS => {
+                                    debug::update(|s| s.percent = s.percent.saturating_sub(1));
+                                    true
+                                }
+                                ID_SIM_PLUS => {
+                                    debug::update(|s| s.percent = s.percent.saturating_add(1));
+                                    true
+                                }
+                                id if id >= ID_SIM_LEVEL_BASE && id <= ID_SIM_LEVEL_BASE + 100 => {
+                                    let level = (id - ID_SIM_LEVEL_BASE) as u8;
+                                    debug::update(|s| s.percent = level);
+                                    true
+                                }
+                                _ => false,
+                            };
+                            if touched {
+                                apply_simulation(hwnd);
+                            }
                         }
                         _ => {}
                     }

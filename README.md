@@ -60,6 +60,24 @@ Une notification arrive à 20 % puis à 10 %, une seule fois par décharge. Un
 Le pourcentage exact ne figure pas dans l'icône : à seize pixels, trois
 chiffres sont illisibles et alourdissent la barre. Il est dans l'infobulle.
 
+## Mode de simulation
+
+```bash
+sc-battery.exe --debug
+```
+
+Le menu contextuel reçoit alors une section supplémentaire : niveau au choix,
+charge, socle, déconnexion. Le matériel n'est plus interrogé du tout — le fil
+de lecture écraserait les valeurs choisies.
+
+Il existe parce que certains états se méritent : une batterie à 8 % ne se
+provoque pas sur commande, et vérifier le rendu sur barre des tâches claire
+suppose de changer le thème du système.
+
+L'infobulle est préfixée de `[simulation]`. Sans cette mention, on finirait par
+prendre une valeur inventée pour une mesure — l'erreur exacte que ce mode
+sert à débusquer.
+
 ## La consommation
 
 C'est la contrainte qui a dicté toute l'architecture. Le processus est une
@@ -215,6 +233,8 @@ pour Win32. Ni framework graphique, ni runtime.
 | [`src/tray.rs`](src/tray.rs) | `Shell_NotifyIcon`, menu, ballons. |
 | [`src/autostart.rs`](src/autostart.rs) | Clé `Run` de l'utilisateur courant. |
 | [`src/settings.rs`](src/settings.rs) | Préférences, dans notre propre branche du registre. |
+| [`src/icons.rs`](src/icons.rs) | Masques des icônes, engendrés hors ligne. Ne pas modifier à la main. |
+| [`src/debug.rs`](src/debug.rs) | Mode de simulation, derrière `--debug`. |
 | [`src/main.rs`](src/main.rs) | Fenêtre cachée, fil de lecture, boucle de messages. |
 
 ## Limites
