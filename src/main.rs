@@ -23,6 +23,7 @@
 mod autostart;
 mod hid;
 mod icon;
+mod icons;
 mod settings;
 mod state;
 mod tray;
@@ -91,7 +92,9 @@ fn wide(s: &str) -> Vec<u16> {
 fn icon_size(hwnd: HWND) -> u32 {
     let dpi = unsafe { GetDpiForWindow(hwnd) };
     let dpi = if dpi == 0 { 96 } else { dpi };
-    (16 * dpi / 96).clamp(16, 64)
+    // Ramenée à une taille réellement dessinée : une icône redimensionnée
+    // serait floue, et c'est justement ce qu'on cherche à éviter.
+    icon::snap_size((16 * dpi / 96).clamp(16, 64))
 }
 
 /// Reconstruit l'icône, que son apparence ait changé ou non.

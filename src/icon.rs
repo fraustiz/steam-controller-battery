@@ -1,9 +1,13 @@
-//! Rendu de l'icône : une batterie verticale, dessinée pixel par pixel.
+//! Rendu de l'icône, composé à partir des masques de [`crate::icons`].
 //!
-//! Tout est tracé à la main plutôt que par GDI. À seize pixels de côté, GDI
-//! place ses traits à la demi-unité près et rend un contour flou ; ici chaque
-//! forme est décrite analytiquement puis échantillonnée seize fois par pixel,
-//! ce qui donne un bord net à toute densité d'écran.
+//! Les formes viennent de Material Symbols, rastérisées hors ligne à chacune
+//! des tailles que Windows réclame. Ce module n'a donc plus à dessiner de
+//! géométrie : il choisit les pièces, leur donne une couleur, et les empile.
+//!
+//! La couleur est décidée ici plutôt que figée dans les masques, pour deux
+//! raisons. Le cadre et l'éclair doivent suivre le thème du système, sans quoi
+//! ils disparaîtraient sur une barre des tâches claire. Et le barreau de niveau
+//! doit pouvoir changer de teinte sans qu'on ait à regraver une image.
 
 use std::ffi::c_void;
 
@@ -13,73 +17,374 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
 
-use crate::hid::BatteryStatus;
+use crate::icons;
 use crate::state::IconState;
 
-/// Police bitmap des chiffres, trois pixels de large sur cinq de haut.
+/// Tailles auxquelles les masques ont été dessinés.
 ///
-/// Dessinée à la main plutôt que confiée à GDI. À seize pixels, un rendu de
-/// texte antialiasé étale chaque trait sur deux pixels gris et devient
-/// illisible ; une grille alignée au pixel reste nette, et c'est ce qu'emploient
-/// depuis toujours les indicateurs de la barre des tâches.
+/// Ce sont celles que Windows demande à 100, 125, 150 et 200 % de mise à
+/// l'échelle. Toute autre taille est ramenée à la plus proche : mieux vaut une
+/// icône nette d'un pixel trop petite qu'une icône redimensionnée et floue.
+pub const BAKED_SIZES: [u32; 4] = [16, 20, 24, 32];
+
+/// Couleur du barreau, du plus vide au plus plein.
+const BAR_COLOURS: [(u8, u8, u8); 6] = [
+    (0xE6, 0x54, 0x38), // rouge
+    (0xEF, 0x9A, 0x28), // ambre
+    (0xDF, 0xB5, 0x28), // jaune
+    (0xA4, 0xBD, 0x32), // vert-jaune
+    (0x4E, 0xB4, 0x41), // vert
+    (0x3D, 0xA6, 0x38), // vert soutenu
+];
+
+/// Bornes hautes de chaque palier.
+///
+/// Les paliers hauts sont larges parce qu'ils importent peu : entre 95 et 75 %
+/// la nuance n'intéresse personne. Les bas sont resserrés, puisque c'est là
+/// qu'on regarde l'icône. Le passage au rouge tombe juste avant le premier
+/// seuil de notification, de sorte que la couleur prévient avant le message.
+const BAR_LIMITS: [u8; 5] = [15, 30, 50, 70, 88];
+
+/// Le biseau de la manette en charge garde une teinte fixe.
+///
+/// Il ne peut pas représenter un niveau — sa forme est constante — et le teinter
+/// selon la charge ferait croire à une mesure qu'il ne porte pas.
+const CHARGE_WEDGE: (u8, u8, u8) = (0x3D, 0xA6, 0x38);
+
+/// Le palier correspondant à un niveau.
+pub fn bar_index(percent: u8) -> usize {
+    BAR_LIMITS.iter().position(|&limit| percent <= limit).unwrap_or(BAR_LIMITS.len())
+}
+
+/// Encre des pièces de structure — cadre, téton, prise barrée.
+pub fn structure_colour(dark_theme: bool) -> (u8, u8, u8) {
+    if dark_theme {
+        (0xE3, 0xE3, 0xE3)
+    } else {
+        (0x3A, 0x3A, 0x3A)
+    }
+}
+
+/// Encre de l'éclair. Un jaune franc sur fond sombre ; le même, assombri en
+/// ocre, sur fond clair, où un jaune vif serait illisible.
+pub fn bolt_colour(dark_theme: bool) -> (u8, u8, u8) {
+    if dark_theme {
+        (0xFF, 0xF5, 0x00)
+    } else {
+        (0xB3, 0x8F, 0x00)
+    }
+}
+
+/// Les pièces disponibles à une taille donnée.
+struct Art {
+    frame: &'static [u8],
+    nub: &'static [u8],
+    bars: [&'static [u8]; 6],
+    bolt_frame: &'static [u8],
+    bolt: &'static [u8],
+    wedge: &'static [u8],
+    off: [&'static [u8]; 2],
+}
+
+/// Construit le jeu de pièces d'une taille. Une branche par taille : les noms
+/// des masques sont engendrés, les assembler par macro générative coûterait
+/// plus de lisibilité que de lignes économisées.
+macro_rules! art_for {
+    (16) => {
+        Art {
+            frame: &icons::FRAME_16,
+            nub: &icons::NUB_16,
+            bars: [
+                &icons::BAR1_16, &icons::BAR2_16, &icons::BAR3_16,
+                &icons::BAR4_16, &icons::BAR6_16, &icons::BARFULL_16,
+            ],
+            bolt_frame: &icons::BOLTFRAME_16,
+            bolt: &icons::BOLT_16,
+            wedge: &icons::CHARGEWEDGE_16,
+            off: [&icons::OFF1_16, &icons::OFF2_16],
+        }
+    };
+    (20) => {
+        Art {
+            frame: &icons::FRAME_20,
+            nub: &icons::NUB_20,
+            bars: [
+                &icons::BAR1_20, &icons::BAR2_20, &icons::BAR3_20,
+                &icons::BAR4_20, &icons::BAR6_20, &icons::BARFULL_20,
+            ],
+            bolt_frame: &icons::BOLTFRAME_20,
+            bolt: &icons::BOLT_20,
+            wedge: &icons::CHARGEWEDGE_20,
+            off: [&icons::OFF1_20, &icons::OFF2_20],
+        }
+    };
+    (24) => {
+        Art {
+            frame: &icons::FRAME_24,
+            nub: &icons::NUB_24,
+            bars: [
+                &icons::BAR1_24, &icons::BAR2_24, &icons::BAR3_24,
+                &icons::BAR4_24, &icons::BAR6_24, &icons::BARFULL_24,
+            ],
+            bolt_frame: &icons::BOLTFRAME_24,
+            bolt: &icons::BOLT_24,
+            wedge: &icons::CHARGEWEDGE_24,
+            off: [&icons::OFF1_24, &icons::OFF2_24],
+        }
+    };
+    (32) => {
+        Art {
+            frame: &icons::FRAME_32,
+            nub: &icons::NUB_32,
+            bars: [
+                &icons::BAR1_32, &icons::BAR2_32, &icons::BAR3_32,
+                &icons::BAR4_32, &icons::BAR6_32, &icons::BARFULL_32,
+            ],
+            bolt_frame: &icons::BOLTFRAME_32,
+            bolt: &icons::BOLT_32,
+            wedge: &icons::CHARGEWEDGE_32,
+            off: [&icons::OFF1_32, &icons::OFF2_32],
+        }
+    };
+}
+
+/// La taille dessinée la plus proche de celle demandée.
+pub fn snap_size(requested: u32) -> u32 {
+    *BAKED_SIZES
+        .iter()
+        .min_by_key(|&&s| s.abs_diff(requested))
+        .unwrap_or(&16)
+}
+
+fn art(size: u32) -> Art {
+    match size {
+        20 => art_for!(20),
+        24 => art_for!(24),
+        32 => art_for!(32),
+        _ => art_for!(16),
+    }
+}
+
+/// Composition « source par-dessus », en alpha non prémultiplié.
+fn blend(dst: &mut u32, colour: (u8, u8, u8), alpha: f32) {
+    if alpha <= 0.0 {
+        return;
+    }
+    let a = alpha.min(1.0);
+    let (dr, dg, db) = (
+        ((*dst >> 16) & 0xFF) as f32,
+        ((*dst >> 8) & 0xFF) as f32,
+        (*dst & 0xFF) as f32,
+    );
+    let da = ((*dst >> 24) & 0xFF) as f32 / 255.0;
+    let out_a = a + da * (1.0 - a);
+    if out_a <= 0.0 {
+        *dst = 0;
+        return;
+    }
+    let mix = |s: u8, d: f32| {
+        ((s as f32 * a + d * da * (1.0 - a)) / out_a)
+            .round()
+            .clamp(0.0, 255.0) as u32
+    };
+    *dst = (((out_a * 255.0).round() as u32) << 24)
+        | (mix(colour.0, dr) << 16)
+        | (mix(colour.1, dg) << 8)
+        | mix(colour.2, db);
+}
+
+/// Pose une pièce dans la couleur demandée.
+fn paint(px: &mut [u32], mask: &[u8], colour: (u8, u8, u8)) {
+    for (dst, &a) in px.iter_mut().zip(mask.iter()) {
+        if a > 0 {
+            blend(dst, colour, a as f32 / 255.0);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Le nombre, pour l'affichage chiffré
+// ---------------------------------------------------------------------------
+
+/// Chiffres, trois pixels de large sur cinq de haut.
+///
+/// Dessinés à la main plutôt que confiés à GDI : à cette taille, un rendu de
+/// texte antialiasé étale chaque trait sur deux pixels gris.
 const DIGITS: [[u8; 5]; 10] = [
-    [0b111, 0b101, 0b101, 0b101, 0b111], // 0
-    [0b010, 0b110, 0b010, 0b010, 0b111], // 1
-    [0b111, 0b001, 0b111, 0b100, 0b111], // 2
-    [0b111, 0b001, 0b111, 0b001, 0b111], // 3
-    [0b101, 0b101, 0b111, 0b001, 0b001], // 4
-    [0b111, 0b100, 0b111, 0b001, 0b111], // 5
-    [0b111, 0b100, 0b111, 0b101, 0b111], // 6
-    [0b111, 0b001, 0b001, 0b001, 0b001], // 7
-    [0b111, 0b101, 0b111, 0b101, 0b111], // 8
-    [0b111, 0b101, 0b111, 0b001, 0b111], // 9
+    [0b111, 0b101, 0b101, 0b101, 0b111],
+    [0b010, 0b110, 0b010, 0b010, 0b111],
+    [0b111, 0b001, 0b111, 0b100, 0b111],
+    [0b111, 0b001, 0b111, 0b001, 0b111],
+    [0b101, 0b101, 0b111, 0b001, 0b001],
+    [0b111, 0b100, 0b111, 0b001, 0b111],
+    [0b111, 0b100, 0b111, 0b101, 0b111],
+    [0b111, 0b001, 0b001, 0b001, 0b001],
+    [0b111, 0b101, 0b111, 0b101, 0b111],
+    [0b111, 0b101, 0b111, 0b001, 0b111],
 ];
 
 const DIGIT_W: u32 = 3;
 const DIGIT_H: u32 = 5;
-/// Colonne vide entre deux chiffres.
 const DIGIT_SPACING: u32 = 1;
 
-/// Opacité du dessin lorsque le niveau est inconnu.
-const DIM_UNKNOWN: f32 = 0.5;
+fn digits_mask(value: u8, scale: u32) -> (Vec<bool>, u32, u32) {
+    let text: Vec<u8> = value.to_string().bytes().map(|b| b - b'0').collect();
+    let n = text.len() as u32;
+    let w = (n * DIGIT_W + (n - 1) * DIGIT_SPACING) * scale;
+    let h = DIGIT_H * scale;
+    let mut mask = vec![false; (w * h) as usize];
 
-/// Racine du nombre d'échantillons par pixel. Quatre par quatre suffisent à
-/// lisser un contour d'un pixel d'épaisseur.
-const SUPERSAMPLE: u32 = 4;
-
-/// Couleur du remplissage selon le niveau : vert franc en haut, ambre au
-/// milieu, rouge en bas. Les paliers coïncident avec les seuils de notification.
-pub fn level_color(percent: u8) -> (u8, u8, u8) {
-    const STOPS: &[(u8, (u8, u8, u8))] = &[
-        (0, (0xE5, 0x48, 0x3C)),   // rouge
-        (10, (0xE8, 0x5C, 0x35)),  // rouge orangé
-        (20, (0xEF, 0x9A, 0x28)),  // ambre
-        (45, (0xD8, 0xC0, 0x28)),  // or
-        (70, (0x54, 0xB8, 0x43)),  // vert
-        (100, (0x3D, 0xA6, 0x38)), // vert soutenu
-    ];
-    let p = percent.min(100);
-    for w in STOPS.windows(2) {
-        let ((p0, c0), (p1, c1)) = (w[0], w[1]);
-        if p <= p1 {
-            let span = (p1 - p0).max(1) as i32;
-            let into = (p - p0) as i32;
-            let lerp = |a: u8, b: u8| (a as i32 + (b as i32 - a as i32) * into / span) as u8;
-            return (lerp(c0.0, c1.0), lerp(c0.1, c1.1), lerp(c0.2, c1.2));
+    for (i, d) in text.iter().enumerate() {
+        let glyph = &DIGITS[*d as usize % 10];
+        let ox = i as u32 * (DIGIT_W + DIGIT_SPACING) * scale;
+        for (row, bits) in glyph.iter().enumerate() {
+            for col in 0..DIGIT_W {
+                if bits & (1 << (DIGIT_W - 1 - col)) == 0 {
+                    continue;
+                }
+                for sy in 0..scale {
+                    for sx in 0..scale {
+                        let x = ox + col * scale + sx;
+                        let y = row as u32 * scale + sy;
+                        mask[(y * w + x) as usize] = true;
+                    }
+                }
+            }
         }
     }
-    STOPS[STOPS.len() - 1].1
+    (mask, w, h)
 }
 
-/// Le contour doit contraster avec la barre des tâches, dont le ton suit le
-/// thème du système. Une icône blanche sur une barre claire serait invisible.
-pub fn outline_color() -> (u8, u8, u8) {
-    if system_uses_light_theme() {
-        (0x3A, 0x3A, 0x3A)
-    } else {
-        // Un blanc franc écraserait le remplissage : le contour doit cadrer la
-        // couleur, pas lui disputer l'attention.
-        (0xDC, 0xDC, 0xDC)
+/// Dessine le pourcentage seul, aussi gros que l'icône le permet.
+///
+/// Il remplace l'icône au lieu de s'y ajouter. À seize pixels, le corps d'une
+/// batterie ne laisse que quelques pixels utiles, où deux chiffres deviennent
+/// des taches ; sans cadre, ils occupent quatre fois la surface. C'est la
+/// couleur du nombre qui porte alors le niveau.
+fn draw_percent(px: &mut [u32], size: u32, percent: u8, dark_theme: bool) {
+    let percent = percent.min(100);
+    let digits = match percent {
+        0..=9 => 1u32,
+        10..=99 => 2,
+        _ => 3,
+    };
+    let margin = (size / 16).max(1);
+    let avail = size - 2 * margin;
+    let scale = (1..=8u32)
+        .rev()
+        .find(|&sc| {
+            (digits * DIGIT_W + (digits - 1) * DIGIT_SPACING) * sc <= avail && DIGIT_H * sc <= avail
+        })
+        .unwrap_or(1);
+
+    let (mask, w, h) = digits_mask(percent, scale);
+    if w > size || h > size {
+        return;
+    }
+    let (ox, oy) = ((size - w) / 2, (size - h) / 2);
+
+    let colour = {
+        let c = BAR_COLOURS[bar_index(percent)];
+        if dark_theme {
+            c
+        } else {
+            // Les tons vifs du niveau passent mal sur une barre claire.
+            let f = |v: u8| (v as f32 * 0.72).round() as u8;
+            (f(c.0), f(c.1), f(c.2))
+        }
+    };
+
+    for y in 0..h {
+        for x in 0..w {
+            if mask[(y * w + x) as usize] {
+                blend(&mut px[((oy + y) * size + ox + x) as usize], colour, 1.0);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Composition
+// ---------------------------------------------------------------------------
+
+/// Dessine l'icône dans un tampon de pixels, sans toucher à GDI.
+pub fn draw(px: &mut [u32], size: u32, state: IconState, show_percent: bool, dark_theme: bool) {
+    // Le mode chiffré remplace tout : voir `draw_percent`.
+    if show_percent {
+        if let IconState::Battery(s) = state {
+            draw_percent(px, size, s.percent, dark_theme);
+            return;
+        }
+    }
+
+    let a = art(size);
+    let structure = structure_colour(dark_theme);
+
+    match state {
+        IconState::Battery(s) if s.charging => {
+            paint(px, a.bolt_frame, structure);
+            paint(px, a.wedge, CHARGE_WEDGE);
+            paint(px, a.bolt, bolt_colour(dark_theme));
+        }
+        IconState::Battery(s) => {
+            paint(px, a.frame, structure);
+            paint(px, a.nub, structure);
+            paint(px, a.bars[bar_index(s.percent)], BAR_COLOURS[bar_index(s.percent)]);
+        }
+        // Éteinte sur son socle : elle charge, mais son niveau est hors
+        // d'atteinte. On montre donc l'éclair sans le moindre barreau, plutôt
+        // qu'un niveau inventé.
+        IconState::Docked => {
+            paint(px, a.bolt_frame, structure);
+            paint(px, a.bolt, bolt_colour(dark_theme));
+        }
+        IconState::Disconnected => {
+            for piece in a.off {
+                paint(px, piece, structure);
+            }
+        }
+    }
+}
+
+/// Construit l'icône. Le résultat appartient à l'appelant, qui doit la libérer
+/// par `DestroyIcon`.
+pub fn render(state: IconState, size: u32, show_percent: bool) -> HICON {
+    let size = snap_size(size);
+    let n = (size * size) as usize;
+    let dark = !system_uses_light_theme();
+
+    unsafe {
+        let dc = CreateCompatibleDC(std::ptr::null_mut());
+
+        let mut bmi: BITMAPINFO = std::mem::zeroed();
+        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bmi.bmiHeader.biWidth = size as i32;
+        bmi.bmiHeader.biHeight = -(size as i32); // de haut en bas
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let dib = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+        let old = SelectObject(dc, dib as HGDIOBJ);
+
+        let px = std::slice::from_raw_parts_mut(bits as *mut u32, n);
+        px.fill(0);
+        draw(px, size, state, show_percent, dark);
+
+        // Le masque monochrome n'est pas consulté pour une icône 32 bits avec
+        // couche alpha, mais `CreateIconIndirect` en exige un.
+        let empty = vec![0u8; (size as usize).div_ceil(8) * size as usize];
+        let mono = CreateBitmap(size as i32, size as i32, 1, 1, empty.as_ptr() as *const c_void);
+
+        let info = ICONINFO { fIcon: 1, xHotspot: 0, yHotspot: 0, hbmMask: mono, hbmColor: dib };
+        let icon = CreateIconIndirect(&info);
+
+        SelectObject(dc, old);
+        DeleteObject(mono as HGDIOBJ);
+        DeleteObject(dib as HGDIOBJ);
+        DeleteDC(dc);
+        icon
     }
 }
 
@@ -87,12 +392,11 @@ fn system_uses_light_theme() -> bool {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegQueryValueExW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
     };
 
-    let wide = |s: &str| -> Vec<u16> {
-        std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
-    };
+    let wide =
+        |s: &str| -> Vec<u16> { std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect() };
     let path = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
     let name = wide("SystemUsesLightTheme");
 
@@ -116,829 +420,96 @@ fn system_uses_light_theme() -> bool {
     }
 }
 
-/// Géométrie de la batterie, en unités de la taille de l'icône.
-///
-/// Les proportions sont pensées pour que le dessin remplisse le carré : à
-/// seize pixels, le corps occupe neuf pixels de large sur treize de haut, ce
-/// qui laisse dix pixels utiles de remplissage — assez pour que chaque dizaine
-/// de pourcents se distingue.
-struct Geometry {
-    body: (f32, f32, f32, f32), // x0, y0, x1, y1
-    nub: (f32, f32, f32, f32),
-    inner: (f32, f32, f32, f32),
-    radius: f32,
-    stroke: f32,
-}
-
-impl Geometry {
-    /// `roomy` élargit le corps pour qu'un nombre à deux chiffres tienne à
-    /// l'intérieur. Sans cet élargissement, l'aire utile d'une icône de seize
-    /// pixels ne fait que cinq pixels de large, quand deux chiffres en
-    /// réclament six : le nombre ne rentrerait tout simplement pas.
-    fn new_roomy(size: f32, roomy: bool) -> Self {
-        let stroke = (size / 16.0).max(1.0);
-        // Marge franche tout autour : un dessin qui affleure le bord du carré
-        // paraît rogné une fois posé dans la barre des tâches.
-        let margin = (size / 16.0).clamp(1.0, 2.0);
-        let nub_h = (size * 0.075).max(1.0);
-        let nub_y = margin;
-        // Un corps plus étroit que haut : c'est le rapport qui fait lire
-        // « batterie » plutôt que « gélule ». On l'élargit lorsqu'il doit
-        // héberger un nombre, au prix d'une silhouette un peu plus trapue.
-        // Fraction du bord gauche : plus elle est petite, plus le corps est large.
-        let half = if roomy { 0.16 } else { 0.25 };
-        let body = (size * half, nub_y + nub_h * 0.7, size * (1.0 - half), size - margin);
-        let nub = (size * 0.385, nub_y, size * 0.615, nub_y + nub_h + stroke);
-        // Espace minime entre le contour et le remplissage : au-delà, le
-        // contour prend un poids visuel qu'il ne doit pas avoir.
-        let gap = stroke * 0.3;
-        let inner = (
-            body.0 + stroke + gap,
-            body.1 + stroke + gap,
-            body.2 - stroke - gap,
-            body.3 - stroke - gap,
-        );
-        Self { body, nub, inner, radius: size * 0.10, stroke }
-    }
-
-    fn new(size: f32) -> Self {
-        Self::new_roomy(size, false)
-    }
-
-    /// Hauteur du remplissage pour un niveau donné. Un niveau non nul garde
-    /// toujours au moins un filet visible : une batterie à 1 % ne doit pas
-    /// s'afficher vide.
-    fn fill_top(&self, percent: u8) -> f32 {
-        let h = self.inner.3 - self.inner.1;
-        let frac = percent.min(100) as f32 / 100.0;
-        let filled = if percent == 0 { 0.0 } else { (h * frac).max(self.stroke) };
-        self.inner.3 - filled
-    }
-}
-
-fn in_rect(x: f32, y: f32, r: (f32, f32, f32, f32)) -> bool {
-    x >= r.0 && x < r.2 && y >= r.1 && y < r.3
-}
-
-/// Rectangle à coins arrondis : hors des quatre quarts de cercle, on retombe
-/// sur un rectangle simple.
-fn in_rounded_rect(x: f32, y: f32, r: (f32, f32, f32, f32), radius: f32) -> bool {
-    if !in_rect(x, y, r) {
-        return false;
-    }
-    let radius = radius.min((r.2 - r.0) / 2.0).min((r.3 - r.1) / 2.0);
-    let cx = x.clamp(r.0 + radius, r.2 - radius);
-    let cy = y.clamp(r.1 + radius, r.3 - radius);
-    let (dx, dy) = (x - cx, y - cy);
-    dx * dx + dy * dy <= radius * radius
-}
-
-/// Test d'appartenance à un polygone, par lancer de rayon.
-fn in_polygon(x: f32, y: f32, pts: &[(f32, f32)]) -> bool {
-    let mut inside = false;
-    let mut j = pts.len() - 1;
-    for i in 0..pts.len() {
-        let (xi, yi) = pts[i];
-        let (xj, yj) = pts[j];
-        if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
-}
-
-/// Distance d'un point à un segment.
-fn segment_distance(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
-    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-    let len2 = dx * dx + dy * dy;
-    let t = if len2 <= f32::EPSILON {
-        0.0
-    } else {
-        (((px - a.0) * dx + (py - a.1) * dy) / len2).clamp(0.0, 1.0)
-    };
-    let (cx, cy) = (a.0 + t * dx, a.1 + t * dy);
-    ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
-}
-
-/// Le polygone, épaissi d'une largeur constante.
-///
-/// Dilater les sommets autour du centre aurait grossi la forme
-/// proportionnellement à sa taille, jusqu'à la faire sortir du cadre ; épaissir
-/// par la distance au tracé ajoute la même épaisseur partout, quelle que soit
-/// l'échelle.
-fn near_polygon(x: f32, y: f32, pts: &[(f32, f32)], width: f32) -> bool {
-    if in_polygon(x, y, pts) {
-        return true;
-    }
-    let mut j = pts.len() - 1;
-    for i in 0..pts.len() {
-        if segment_distance(x, y, pts[j], pts[i]) <= width {
-            return true;
-        }
-        j = i;
-    }
-    false
-}
-
-/// L'éclair de charge, inscrit dans le corps de la batterie.
-fn bolt_points(g: &Geometry) -> Vec<(f32, f32)> {
-    const SHAPE: &[(f32, f32)] = &[
-        (0.66, 0.00),
-        (0.06, 0.58),
-        (0.42, 0.58),
-        (0.34, 1.00),
-        (0.94, 0.40),
-        (0.58, 0.40),
-    ];
-    // L'éclair prend appui sur le corps entier, pas sur l'aire de remplissage :
-    // à seize pixels, une forme confinée à l'intérieur devient une tache.
-    let (x0, y0, x1, y1) = g.body;
-    let (w, h) = (x1 - x0, y1 - y0);
-    let inset = h * 0.06;
-    SHAPE
-        .iter()
-        .map(|(fx, fy)| (x0 + w * fx, y0 + inset + (h - 2.0 * inset) * fy))
-        .collect()
-}
-
-/// Proportion d'un pixel couverte par une forme, par suréchantillonnage.
-fn coverage(px: u32, py: u32, inside: impl Fn(f32, f32) -> bool) -> f32 {
-    let n = SUPERSAMPLE;
-    let step = 1.0 / n as f32;
-    let mut hits = 0u32;
-    for sy in 0..n {
-        for sx in 0..n {
-            let x = px as f32 + (sx as f32 + 0.5) * step;
-            let y = py as f32 + (sy as f32 + 0.5) * step;
-            if inside(x, y) {
-                hits += 1;
-            }
-        }
-    }
-    hits as f32 / (n * n) as f32
-}
-
-/// Composition « source par-dessus », en alpha non prémultiplié.
-fn blend(dst: &mut u32, color: (u8, u8, u8), alpha: f32) {
-    if alpha <= 0.0 {
-        return;
-    }
-    let a = alpha.min(1.0);
-    let (dr, dg, db) = (((*dst >> 16) & 0xFF) as f32, ((*dst >> 8) & 0xFF) as f32, (*dst & 0xFF) as f32);
-    let da = ((*dst >> 24) & 0xFF) as f32 / 255.0;
-
-    let out_a = a + da * (1.0 - a);
-    if out_a <= 0.0 {
-        *dst = 0;
-        return;
-    }
-    let mix = |s: u8, d: f32| ((s as f32 * a + d * da * (1.0 - a)) / out_a).round().clamp(0.0, 255.0) as u32;
-    *dst = (((out_a * 255.0).round() as u32) << 24)
-        | (mix(color.0, dr) << 16)
-        | (mix(color.1, dg) << 8)
-        | mix(color.2, db);
-}
-
-/// Retire de la matière : sert à creuser le liseré autour de l'éclair.
-fn erase(dst: &mut u32, amount: f32) {
-    if amount <= 0.0 {
-        return;
-    }
-    let keep = (1.0 - amount.min(1.0)).max(0.0);
-    let a = ((*dst >> 24) & 0xFF) as f32 * keep;
-    *dst = (*dst & 0x00FF_FFFF) | ((a.round() as u32) << 24);
-}
-
-/// Le masque des chiffres d'un nombre, à l'échelle demandée, et sa taille.
-fn digits_mask(value: u8, scale: u32, spacing: u32) -> (Vec<bool>, u32, u32) {
-    let text: Vec<u8> = value
-        .to_string()
-        .bytes()
-        .map(|b| b - b'0')
-        .collect();
-    let w = (text.len() as u32 * DIGIT_W + (text.len() as u32 - 1) * spacing) * scale;
-    let h = DIGIT_H * scale;
-    let mut mask = vec![false; (w * h) as usize];
-
-    for (i, d) in text.iter().enumerate() {
-        let glyph = &DIGITS[*d as usize % 10];
-        let ox = i as u32 * (DIGIT_W + spacing) * scale;
-        for (row, bits) in glyph.iter().enumerate() {
-            for col in 0..DIGIT_W {
-                // Le bit de poids fort est la colonne de gauche.
-                if bits & (1 << (DIGIT_W - 1 - col)) == 0 {
-                    continue;
-                }
-                for sy in 0..scale {
-                    for sx in 0..scale {
-                        let x = ox + col * scale + sx;
-                        let y = row as u32 * scale + sy;
-                        mask[(y * w + x) as usize] = true;
-                    }
-                }
-            }
-        }
-    }
-    (mask, w, h)
-}
-
-/// Assombrit une couleur, pour qu'elle tienne sur un fond clair.
-fn darken(c: (u8, u8, u8), factor: f32) -> (u8, u8, u8) {
-    let f = |v: u8| (v as f32 * factor).round().clamp(0.0, 255.0) as u8;
-    (f(c.0), f(c.1), f(c.2))
-}
-
-/// Dessine le pourcentage, seul, aussi gros que l'icône le permet.
-///
-/// Le cadre de la batterie est délibérément absent dans ce mode. À seize
-/// pixels, il ne laissait que huit pixels utiles : deux chiffres y tenaient en
-/// 3×5, à la limite du déchiffrable. Sans cadre, les mêmes chiffres passent à
-/// 6×10 — quatre fois la surface. Le niveau reste lisible d'un coup d'œil,
-/// puisque c'est lui qui donne sa couleur au nombre.
-fn draw_percent(px: &mut [u32], size: u32, percent: u8, dark_theme: bool) {
-    let percent = percent.min(100);
-    let digits = match percent {
-        0..=9 => 1u32,
-        10..=99 => 2,
-        _ => 3,
-    };
-    // Une marge d'un pixel de chaque côté : un chiffre qui affleure le bord
-    // paraît rogné dans la barre des tâches.
-    let margin = (size / 16).max(1);
-    let avail = size - 2 * margin;
-
-    let scale = (1..=8u32)
-        .rev()
-        .find(|&sc| {
-            let w = (digits * DIGIT_W + (digits - 1) * DIGIT_SPACING) * sc;
-            w <= avail && DIGIT_H * sc <= avail
-        })
-        .unwrap_or(1);
-
-    let (mask, w, h) = digits_mask(percent, scale, DIGIT_SPACING);
-    if w > size || h > size {
-        return;
-    }
-    let ox = ((size - w) / 2) as i64;
-    let oy = ((size - h) / 2) as i64;
-
-    let colour = {
-        let c = level_color(percent);
-        // Les tons vifs du niveau passent mal sur une barre des tâches claire.
-        if dark_theme { c } else { darken(c, 0.72) }
-    };
-
-    for y in 0..h as i64 {
-        for x in 0..w as i64 {
-            if !mask[(y as u32 * w + x as u32) as usize] {
-                continue;
-            }
-            let i = ((oy + y) as u32 * size + (ox + x) as u32) as usize;
-            blend(&mut px[i], colour, 1.0);
-        }
-    }
-}
-
-/// Dessine l'icône dans un tampon de pixels. Séparé de toute création d'objet
-/// GDI, donc vérifiable directement.
-pub fn draw(px: &mut [u32], size: u32, state: IconState, show_percent: bool) {
-    draw_themed(px, size, state, outline_color(), show_percent)
-}
-
-/// Variante à contour imposé, pour pouvoir contrôler le rendu sur les deux
-/// thèmes sans dépendre de celui de la machine.
-pub fn draw_themed(
-    px: &mut [u32],
-    size: u32,
-    state: IconState,
-    outline: (u8, u8, u8),
-    show_percent: bool,
-) {
-    // En mode chiffré, le nombre remplace entièrement la batterie : c'est le
-    // seul moyen d'obtenir des chiffres lisibles à seize pixels. Sa couleur
-    // porte le niveau, l'infobulle porte la charge.
-    if show_percent {
-        if let IconState::Battery(s) = state {
-            draw_percent(px, size, s.percent, outline.0 > 128);
-            return;
-        }
-    }
-
-    match state {
-        IconState::Battery(s) => draw_battery(px, size, &s, outline, false, true),
-        // Sur le socle et éteinte : elle charge, mais son niveau est hors
-        // d'atteinte. La coque et l'éclair disent exactement cela — en charge,
-        // niveau inconnu — là où un remplissage inventerait une mesure.
-        IconState::Docked => {
-            let g = Geometry::new(size as f32);
-            draw_shell(px, size, &g, outline);
-            draw_bolt(px, size, &g, outline);
-            // Atténuation. Sans elle, ce dessin serait rigoureusement celui
-            // d'une batterie mesurée à 0 % en charge — état parfaitement réel,
-            // qu'une manette à plat posée sur son socle produit. Le ton éteint
-            // dit « je ne sais pas », là où le plein dirait « je sais, et c'est
-            // vide ».
-            for p in px.iter_mut() {
-                erase(p, 1.0 - DIM_UNKNOWN);
-            }
-        }
-        // Sans relevé, dessiner une batterie vide serait un contresens : on la
-        // lirait comme une batterie à plat. Une prise dit « pas de liaison ».
-        IconState::Disconnected => draw_plug(px, size, outline),
-    }
-
-}
-
-/// Une prise électrique : deux broches, un corps, un début de cordon.
-///
-/// Les formes sont pleines et non détourées : à seize pixels, un contour d'un
-/// pixel autour d'un objet aussi petit se referme sur lui-même et devient une
-/// tache.
-fn draw_plug(px: &mut [u32], size: u32, color: (u8, u8, u8)) {
-    let s = size as f32;
-    let r = s * 0.07;
-    let prong_left = (s * 0.30, s * 0.10, s * 0.42, s * 0.40);
-    let prong_right = (s * 0.58, s * 0.10, s * 0.70, s * 0.40);
-    let body = (s * 0.20, s * 0.33, s * 0.80, s * 0.66);
-    let cord = (s * 0.43, s * 0.62, s * 0.57, s * 0.90);
-
-    for y in 0..size {
-        for x in 0..size {
-            let c = coverage(x, y, |fx, fy| {
-                in_rounded_rect(fx, fy, prong_left, r * 0.6)
-                    || in_rounded_rect(fx, fy, prong_right, r * 0.6)
-                    || in_rounded_rect(fx, fy, body, r)
-                    || in_rounded_rect(fx, fy, cord, r * 0.5)
-            });
-            blend(&mut px[(y * size + x) as usize], color, c);
-        }
-    }
-}
-
-/// Le contour du corps et son téton.
-fn draw_shell(px: &mut [u32], size: u32, g: &Geometry, outline: (u8, u8, u8)) {
-    for y in 0..size {
-        for x in 0..size {
-            let c = coverage(x, y, |fx, fy| {
-                (in_rounded_rect(fx, fy, g.body, g.radius)
-                    && !in_rounded_rect(fx, fy, g.inner, g.radius * 0.5))
-                    || in_rounded_rect(fx, fy, g.nub, g.radius * 0.4)
-            });
-            blend(&mut px[(y * size + x) as usize], outline, c);
-        }
-    }
-}
-
-/// L'éclair, en deux temps : on creuse d'abord un liseré, puis on trace dedans.
-/// Le vide ainsi dégagé le détache du remplissage quelle qu'en soit la couleur.
-fn draw_bolt(px: &mut [u32], size: u32, g: &Geometry, outline: (u8, u8, u8)) {
-    let bolt = bolt_points(g);
-    let halo = g.stroke * 0.85;
-    for y in 0..size {
-        for x in 0..size {
-            let i = (y * size + x) as usize;
-            erase(&mut px[i], coverage(x, y, |fx, fy| near_polygon(fx, fy, &bolt, halo)));
-            let c = coverage(x, y, |fx, fy| in_polygon(fx, fy, &bolt));
-            blend(&mut px[i], outline, c);
-        }
-    }
-}
-
-fn draw_battery(
-    px: &mut [u32],
-    size: u32,
-    status: &BatteryStatus,
-    outline: (u8, u8, u8),
-    roomy: bool,
-    with_bolt: bool,
-) {
-    let g = Geometry::new_roomy(size as f32, roomy);
-    let fill_color = level_color(status.percent);
-    let fill_top = g.fill_top(status.percent);
-
-    draw_shell(px, size, &g, outline);
-    for y in 0..size {
-        for x in 0..size {
-            let fill = coverage(x, y, |fx, fy| {
-                fy >= fill_top && in_rounded_rect(fx, fy, g.inner, g.radius * 0.5)
-            });
-            blend(&mut px[(y * size + x) as usize], fill_color, fill);
-        }
-    }
-    if status.charging && with_bolt {
-        draw_bolt(px, size, &g, outline);
-    }
-}
-
-/// Construit l'icône. Le résultat appartient à l'appelant, qui doit la libérer
-/// par `DestroyIcon`.
-pub fn render(state: IconState, size: u32, show_percent: bool) -> HICON {
-    let size = size.clamp(16, 64);
-    let n = (size * size) as usize;
-
-    unsafe {
-        let dc = CreateCompatibleDC(std::ptr::null_mut());
-
-        let mut bmi: BITMAPINFO = std::mem::zeroed();
-        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-        bmi.bmiHeader.biWidth = size as i32;
-        bmi.bmiHeader.biHeight = -(size as i32); // orientation de haut en bas
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-
-        let mut bits: *mut c_void = std::ptr::null_mut();
-        let dib = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
-        let old = SelectObject(dc, dib as HGDIOBJ);
-
-        let px = std::slice::from_raw_parts_mut(bits as *mut u32, n);
-        px.fill(0);
-        draw(px, size, state, show_percent);
-
-        // Le masque monochrome n'est pas consulté pour une icône 32 bits avec
-        // couche alpha, mais `CreateIconIndirect` en exige un.
-        let empty = vec![0u8; (size as usize).div_ceil(8) * size as usize];
-        let mono = CreateBitmap(size as i32, size as i32, 1, 1, empty.as_ptr() as *const c_void);
-
-        let info = ICONINFO {
-            fIcon: 1,
-            xHotspot: 0,
-            yHotspot: 0,
-            hbmMask: mono,
-            hbmColor: dib,
-        };
-        let icon = CreateIconIndirect(&info);
-
-        SelectObject(dc, old);
-        DeleteObject(mono as HGDIOBJ);
-        DeleteObject(dib as HGDIOBJ);
-        DeleteDC(dc);
-        icon
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hid::BatteryStatus;
 
     fn at(percent: u8, charging: bool) -> BatteryStatus {
         BatteryStatus { percent, voltage_mv: None, charging, full: false }
-    }
-
-    fn buffer(size: u32, state: IconState) -> Vec<u32> {
-        let mut px = vec![0u32; (size * size) as usize];
-        draw(&mut px, size, state, false);
-        px
-    }
-
-    fn buffer_with_percent(size: u32, state: IconState) -> Vec<u32> {
-        let mut px = vec![0u32; (size * size) as usize];
-        draw(&mut px, size, state, true);
-        px
     }
 
     fn battery(percent: u8, charging: bool) -> IconState {
         IconState::Battery(at(percent, charging))
     }
 
-    fn opaque_pixels(px: &[u32]) -> usize {
+    fn buffer(size: u32, state: IconState, percent_mode: bool) -> Vec<u32> {
+        let mut px = vec![0u32; (size * size) as usize];
+        draw(&mut px, size, state, percent_mode, true);
+        px
+    }
+
+    fn opaque(px: &[u32]) -> usize {
         px.iter().filter(|p| (*p >> 24) & 0xFF > 40).count()
     }
 
-    #[test]
-    fn colour_goes_from_red_through_amber_to_green() {
-        let (r0, g0, _) = level_color(0);
-        let (r100, g100, _) = level_color(100);
-        assert!(r0 > g0, "0 % doit tirer sur le rouge");
-        assert!(g100 > r100, "100 % doit tirer sur le vert");
-    }
-
-    #[test]
-    fn colour_transitions_are_gradual() {
-        for p in 0..100u8 {
-            let (a, b) = (level_color(p), level_color(p + 1));
-            let step = (a.0 as i32 - b.0 as i32).abs()
-                + (a.1 as i32 - b.1 as i32).abs()
-                + (a.2 as i32 - b.2 as i32).abs();
-            assert!(step < 40, "saut de couleur entre {p} et {}", p + 1);
-        }
-    }
-
-    #[test]
-    fn fill_height_grows_with_the_level() {
-        let g = Geometry::new(16.0);
-        let mut previous = f32::MAX;
-        for p in 0..=100u8 {
-            let top = g.fill_top(p);
-            assert!(top <= previous + 0.001, "le remplissage recule à {p} %");
-            assert!(top >= g.inner.1 - 0.001, "le remplissage déborde en haut à {p} %");
-            assert!(top <= g.inner.3 + 0.001, "le remplissage déborde en bas à {p} %");
-            previous = top;
-        }
-    }
-
-    #[test]
-    fn an_empty_battery_is_empty_and_a_full_one_is_full() {
-        let g = Geometry::new(16.0);
-        assert_eq!(g.fill_top(0), g.inner.3, "0 % doit ne rien remplir");
-        assert!((g.fill_top(100) - g.inner.1).abs() < 0.001, "100 % doit tout remplir");
-    }
-
-    #[test]
-    fn a_low_but_nonzero_level_stays_visible() {
-        let g = Geometry::new(16.0);
-        assert!(
-            g.inner.3 - g.fill_top(1) >= g.stroke,
-            "1 % doit laisser un filet visible"
-        );
-    }
-
-    #[test]
-    fn the_drawing_stays_inside_the_canvas_at_every_size() {
-        for size in [16u32, 20, 24, 32, 48, 64] {
-            let px = buffer(size, battery(50, false));
-            assert_eq!(px.len(), (size * size) as usize);
-            // Le pourtour du carré doit rester vide : rien ne doit toucher le bord.
-            for i in 0..size {
-                for &p in &[
-                    px[i as usize],
-                    px[((size - 1) * size + i) as usize],
-                    px[(i * size) as usize],
-                    px[(i * size + size - 1) as usize],
-                ] {
-                    assert_eq!(p >> 24, 0, "le dessin touche le bord à la taille {size}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn a_fuller_battery_paints_more_pixels() {
-        let empty = opaque_pixels(&buffer(32, battery(0, false)));
-        let half = opaque_pixels(&buffer(32, battery(50, false)));
-        let full = opaque_pixels(&buffer(32, battery(100, false)));
-        assert!(half > empty, "50 % doit peindre plus que 0 %");
-        assert!(full > half, "100 % doit peindre plus que 50 %");
-    }
-
-    #[test]
-    fn the_digit_grid_has_the_expected_footprint() {
-        for (value, digits) in [(7u8, 1), (42, 2), (100, 3)] {
-            let (mask, w, h) = digits_mask(value, 1, DIGIT_SPACING);
-            let expected = digits * DIGIT_W + (digits - 1) * DIGIT_SPACING;
-            assert_eq!(w, expected, "largeur pour {value}");
-            assert_eq!(h, DIGIT_H);
-            assert_eq!(mask.len(), (w * h) as usize);
-            assert!(mask.iter().any(|b| *b), "chiffre vide pour {value}");
-        }
-    }
-
-    #[test]
-    fn every_digit_is_drawn_and_distinct() {
-        let mut seen: Vec<Vec<bool>> = Vec::new();
-        for d in 0..10u8 {
-            let (mask, _, _) = digits_mask(d, 1, DIGIT_SPACING);
-            assert!(mask.iter().any(|b| *b), "chiffre {d} vide");
-            assert!(!seen.contains(&mask), "chiffre {d} identique à un autre");
-            seen.push(mask);
-        }
-    }
-
-    #[test]
-    fn the_digits_scale_without_blurring() {
-        // À l'échelle 2, chaque pixel allumé devient un carré plein de 2×2 :
-        // c'est ce qui garde le chiffre net au lieu de l'étaler en gris.
-        let (small, w, h) = digits_mask(8, 1, DIGIT_SPACING);
-        let (big, bw, bh) = digits_mask(8, 2, DIGIT_SPACING);
-        assert_eq!((bw, bh), (w * 2, h * 2));
-        for y in 0..h {
-            for x in 0..w {
-                let lit = small[(y * w + x) as usize];
-                for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-                    let by = y * 2 + dy;
-                    let bx = x * 2 + dx;
-                    assert_eq!(big[(by * bw + bx) as usize], lit, "à ({x},{y})");
-                }
-            }
-        }
-    }
-
-
-
-
-    #[test]
-    fn the_number_is_drawn_large_enough_to_read() {
-        // Le point de tout ce mode : à seize pixels, deux chiffres doivent
-        // occuper 6×10 et non 3×5. Sous cette taille ils redeviennent des
-        // taches, ce qui était le défaut de la première version.
-        for percent in [42u8, 99] {
-            let px = buffer_with_percent(16, battery(percent, false));
-            let painted = px.iter().filter(|p| (*p >> 24) & 0xFF > 40).count();
-            assert!(painted > 40, "chiffre trop maigre pour {percent} % : {painted} pixels");
-
-            let rows: Vec<usize> = (0..16)
-                .filter(|&y| (0..16).any(|x| (px[y * 16 + x] >> 24) & 0xFF > 40))
-                .collect();
-            let height = rows.last().unwrap() - rows.first().unwrap() + 1;
-            assert!(height >= 9, "chiffre haut de {height} px seulement");
-        }
-    }
-
-    #[test]
-    fn neighbouring_levels_are_told_apart() {
-        assert_ne!(
-            buffer_with_percent(16, battery(42, false)),
-            buffer_with_percent(16, battery(43, false))
-        );
-    }
-
-    #[test]
-    fn no_number_is_invented_where_there_is_no_measurement() {
-        for state in [IconState::Docked, IconState::Disconnected] {
-            assert_eq!(
-                buffer(32, state),
-                buffer_with_percent(32, state),
-                "un chiffre a été inscrit sur un état sans mesure : {state:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_number_fits_inside_the_icon_at_every_size() {
-        for size in [16u32, 20, 24, 32, 48, 64] {
-            for percent in [0u8, 9, 50, 99, 100] {
-                let mut px = vec![0u32; (size * size) as usize];
-                draw(&mut px, size, IconState::Battery(at(percent, false)), true);
-                // Rien ne doit toucher le bord : le chiffre non plus.
-                for i in 0..size {
-                    for &p in &[
-                        px[i as usize],
-                        px[((size - 1) * size + i) as usize],
-                        px[(i * size) as usize],
-                        px[(i * size + size - 1) as usize],
-                    ] {
-                        assert_eq!(p >> 24, 0, "débordement à {size} px pour {percent} %");
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn the_three_states_are_visually_distinct() {
-        // Confondre « en charge sur le socle » avec « rien de connecté » ou
-        // avec une batterie mesurée annulerait tout l'intérêt de les avoir
-        // distingués dans le code.
-        let docked = buffer(32, IconState::Docked);
-        let absent = buffer(32, IconState::Disconnected);
-        let measured = buffer(32, battery(0, true));
-        assert_ne!(docked, absent);
-        assert_ne!(docked, measured);
-        assert_ne!(absent, measured);
-    }
-
-    #[test]
-    fn the_docked_icon_is_dimmer_than_a_measured_one() {
-        // Le cas piégeux : une batterie mesurée à 0 % en charge dessine elle
-        // aussi une coque et un éclair, sans remplissage. Seule l'atténuation
-        // les sépare.
-        let docked = buffer(32, IconState::Docked);
-        let flat_charging = buffer(32, battery(0, true));
-        assert_ne!(docked, flat_charging);
-
-        let alpha = |px: &[u32]| px.iter().map(|p| (p >> 24) & 0xFF).sum::<u32>();
-        let (a, b) = (alpha(&docked), alpha(&flat_charging));
-        assert!(a < b, "l'état inconnu doit être plus discret : {a} contre {b}");
-        assert!(a > b / 4, "atténué, mais pas au point de disparaître");
-    }
-
-    #[test]
-    fn a_disconnected_controller_draws_a_plug_not_an_empty_battery() {
-        let disconnected = buffer(32, IconState::Disconnected);
-        let flat = buffer(32, battery(0, false));
-        assert!(opaque_pixels(&disconnected) > 0, "il faut bien dessiner quelque chose");
-        // Le point de tout ceci : une batterie vide se lirait « 0 % », ce qui
-        // est un contresens quand on n'a aucune mesure.
-        assert_ne!(disconnected, flat, "la prise doit se distinguer d'une batterie à plat");
-
-        // La prise est une forme pleine, la batterie vide un simple contour :
-        // la première doit peindre nettement plus de matière.
-        assert!(
-            opaque_pixels(&disconnected) > opaque_pixels(&flat),
-            "la prise doit être plus dense qu'un contour vide"
-        );
-    }
-
-    #[test]
-    fn the_plug_is_a_single_connected_shape() {
-        // Une prise dont les broches flotteraient loin du corps se lirait comme
-        // trois taches sans rapport. On vérifie qu'aucune colonne peinte n'est
-        // isolée : le dessin doit tenir d'un seul tenant horizontalement.
-        let px = buffer(32, IconState::Disconnected);
-        let painted: Vec<usize> = (0..32)
-            .filter(|&x| (0..32).any(|y| (px[y * 32 + x] >> 24) & 0xFF > 40))
-            .collect();
-        assert!(!painted.is_empty());
-        for w in painted.windows(2) {
-            assert_eq!(w[1] - w[0], 1, "colonne vide au milieu de la prise");
-        }
-    }
-
-
-    #[test]
-    fn charging_adds_the_bolt() {
-        let plain = buffer(32, battery(50, false));
-        let charging = buffer(32, battery(50, true));
-        assert_ne!(plain, charging, "l'éclair doit modifier le dessin");
-    }
-
-    #[test]
-    fn every_pixel_is_either_transparent_or_coloured() {
-        // Un pixel opaque totalement noir trahirait une composition ratée.
-        for p in buffer(32, battery(70, true)) {
-            let (a, rgb) = (p >> 24, p & 0x00FF_FFFF);
-            assert!(a == 0 || rgb != 0, "pixel opaque sans couleur");
-        }
-    }
-
-    /// Compose l'icône sur un fond donné, comme le ferait la barre des tâches.
-    fn over(background: (u8, u8, u8), px: u32) -> (u8, u8, u8) {
-        let a = ((px >> 24) & 0xFF) as f32 / 255.0;
-        let src = (((px >> 16) & 0xFF) as f32, ((px >> 8) & 0xFF) as f32, (px & 0xFF) as f32);
-        let mix = |s: f32, d: u8| (s * a + d as f32 * (1.0 - a)).round() as u8;
-        (mix(src.0, background.0), mix(src.1, background.1), mix(src.2, background.2))
-    }
-
-    /// Écrit une planche de contrôle visuelle. Le rendu d'une icône de seize
-    /// pixels ne se juge pas sur des assertions : il faut le regarder, sur
-    /// fond clair comme sur fond sombre.
+    /// Planche de contrôle : tous les états, aux deux thèmes, à taille réelle
+    /// et agrandis. Le rendu d'une icône de seize pixels ne se juge pas sur des
+    /// assertions.
     ///
     /// `cargo test -- --ignored render_preview_sheet`
     #[test]
-    #[ignore = "génère un fichier à inspecter à l'œil"]
+    #[ignore = "génère un fichier à inspecter"]
     fn render_preview_sheet() {
-        let cases: &[(&str, IconState)] = &[
-            ("100", battery(100, false)),
-            ("70", battery(70, false)),
-            ("45", battery(45, false)),
-            ("15", battery(15, false)),
-            ("5", battery(5, false)),
-            ("charge", battery(60, true)),
-            ("socle", IconState::Docked),
-            ("absente", IconState::Disconnected),
+        let cases: Vec<(&str, IconState, bool)> = vec![
+            ("100", battery(100, false), false),
+            ("80", battery(80, false), false),
+            ("60", battery(60, false), false),
+            ("40", battery(40, false), false),
+            ("25", battery(25, false), false),
+            ("8", battery(8, false), false),
+            ("charge", battery(60, true), false),
+            ("socle", IconState::Docked, false),
+            ("absente", IconState::Disconnected, false),
+            ("chiffre", battery(72, false), true),
         ];
-        // Fond de barre des tâches et contour associé, pour contrôler les deux
-        // thèmes sans dépendre de celui de la machine.
-        let backgrounds: &[((u8, u8, u8), (u8, u8, u8))] = &[
-            ((0x20, 0x20, 0x20), (0xDC, 0xDC, 0xDC)),
-            ((0xF3, 0xF3, 0xF3), (0x3A, 0x3A, 0x3A)),
-        ];
+        let backgrounds = [((0x20u8, 0x20u8, 0x20u8), true), ((0xF3, 0xF3, 0xF3), false)];
 
         const ICON: u32 = 16;
-        const ZOOM: u32 = 10;
-        const PAD: u32 = 6;
+        const ZOOM: u32 = 9;
+        const PAD: u32 = 8;
         let cell = ICON * ZOOM + PAD * 2;
         let strip = ICON + PAD * 2;
         let w = cell * cases.len() as u32;
         let h = (cell + strip) * backgrounds.len() as u32;
-
         let mut img = vec![(0u8, 0u8, 0u8); (w * h) as usize];
-        for (bi, &(bg, outline)) in backgrounds.iter().enumerate() {
-            let band_top = bi as u32 * (cell + strip);
-            for y in band_top..(band_top + cell + strip).min(h) {
+
+        let over = |bg: (u8, u8, u8), p: u32| {
+            let a = ((p >> 24) & 0xFF) as f32 / 255.0;
+            let mix = |s: u32, d: u8| ((s as f32) * a + d as f32 * (1.0 - a)).round() as u8;
+            (mix((p >> 16) & 0xFF, bg.0), mix((p >> 8) & 0xFF, bg.1), mix(p & 0xFF, bg.2))
+        };
+
+        for (bi, (bg, dark)) in backgrounds.iter().enumerate() {
+            let top = bi as u32 * (cell + strip);
+            for y in top..(top + cell + strip).min(h) {
                 for x in 0..w {
-                    img[(y * w + x) as usize] = bg;
+                    img[(y * w + x) as usize] = *bg;
                 }
             }
-            for (ci, (_, state)) in cases.iter().enumerate() {
-                let mut px = vec![0u32; (ICON * ICON) as usize];
-                draw_themed(&mut px, ICON, *state, outline, bi == 0);
+            for (ci, (_, state, pc)) in cases.iter().enumerate() {
+                let mut buf = vec![0u32; (ICON * ICON) as usize];
+                draw(&mut buf, ICON, *state, *pc, *dark);
                 let ox = ci as u32 * cell + PAD;
-
-                // Version agrandie, pour juger le tracé.
                 for y in 0..ICON * ZOOM {
                     for x in 0..ICON * ZOOM {
-                        let p = px[((y / ZOOM) * ICON + x / ZOOM) as usize];
-                        img[((band_top + PAD + y) * w + ox + x) as usize] = over(bg, p);
+                        let p = buf[((y / ZOOM) * ICON + x / ZOOM) as usize];
+                        img[((top + PAD + y) * w + ox + x) as usize] = over(*bg, p);
                     }
                 }
-                // Version à taille réelle, pour juger la lisibilité.
                 for y in 0..ICON {
                     for x in 0..ICON {
-                        let p = px[(y * ICON + x) as usize];
-                        img[((band_top + cell + PAD + y) * w + ox + x) as usize] = over(bg, p);
+                        let p = buf[(y * ICON + x) as usize];
+                        img[((top + cell + PAD + y) * w + ox + x) as usize] = over(*bg, p);
                     }
                 }
             }
         }
 
-        // BMP 24 bits, lignes de bas en haut, chaque ligne alignée sur 4 octets.
         let row = (w * 3).next_multiple_of(4) as usize;
-        let pixel_data = row * h as usize;
-        let mut out = Vec::with_capacity(54 + pixel_data);
+        let mut out = Vec::new();
         out.extend_from_slice(b"BM");
-        out.extend_from_slice(&((54 + pixel_data) as u32).to_le_bytes());
+        out.extend_from_slice(&((54 + row * h as usize) as u32).to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes());
         out.extend_from_slice(&54u32.to_le_bytes());
         out.extend_from_slice(&40u32.to_le_bytes());
@@ -955,50 +526,183 @@ mod tests {
             }
             out.resize(start + row, 0);
         }
-
         let path = std::env::temp_dir().join("sc-battery-preview.bmp");
-        std::fs::write(&path, &out).expect("écriture de la planche");
+        std::fs::write(&path, &out).expect("écriture");
         println!("planche écrite : {}", path.display());
     }
 
     #[test]
-    fn coverage_is_bounded_and_meaningful() {
-        assert_eq!(coverage(0, 0, |_, _| false), 0.0);
-        assert_eq!(coverage(0, 0, |_, _| true), 1.0);
-        let half = coverage(0, 0, |x, _| x < 0.5);
-        assert!((half - 0.5).abs() < 0.01, "couverture d'un demi-pixel : {half}");
-    }
-
-    #[test]
-    fn rounded_corners_are_actually_carved() {
-        let r = (0.0, 0.0, 10.0, 10.0);
-        assert!(!in_rounded_rect(0.1, 0.1, r, 3.0), "le coin doit être vide");
-        assert!(in_rounded_rect(5.0, 5.0, r, 3.0), "le centre doit être plein");
-        assert!(in_rounded_rect(0.1, 5.0, r, 3.0), "le milieu du bord doit être plein");
-    }
-
-    #[test]
-    fn the_bolt_polygon_is_closed_and_inside_the_body() {
-        let g = Geometry::new(32.0);
-        let pts = bolt_points(&g);
-        assert!(pts.len() >= 6);
-        for (x, y) in &pts {
-            assert!(*x >= g.body.0 - 0.01 && *x <= g.body.2 + 0.01, "éclair hors du corps");
-            assert!(*y >= g.body.1 - 0.01 && *y <= g.body.3 + 0.01, "éclair hors du corps");
-        }
-        // Le liseré, d'épaisseur constante, ne doit pas non plus sortir du carré.
-        for px in 0..32u32 {
-            for py in 0..32u32 {
-                if near_polygon(px as f32, py as f32, &pts, g.stroke * 0.85) {
-                    assert!((1..31).contains(&px) && (1..31).contains(&py), "liseré hors cadre");
-                }
+    fn every_mask_matches_its_size() {
+        for size in BAKED_SIZES {
+            let a = art(size);
+            let n = (size * size) as usize;
+            let mut pieces: Vec<&[u8]> =
+                vec![a.frame, a.nub, a.bolt_frame, a.bolt, a.wedge, a.off[0], a.off[1]];
+            pieces.extend_from_slice(&a.bars);
+            for piece in pieces {
+                assert_eq!(piece.len(), n, "pièce mal dimensionnée à {size} px");
             }
         }
-        // Le centre géométrique doit tomber dans le polygone.
-        assert!(in_polygon(
-            pts.iter().map(|p| p.0).sum::<f32>() / pts.len() as f32,
-            pts.iter().map(|p| p.1).sum::<f32>() / pts.len() as f32,
-            &pts
-        ));
+    }
+
+    #[test]
+    fn no_mask_is_empty() {
+        // Une pièce vide passerait inaperçue à l'exécution : l'icône
+        // s'afficherait simplement incomplète, sans erreur.
+        for size in BAKED_SIZES {
+            let a = art(size);
+            let mut named: Vec<(&str, &[u8])> = vec![
+                ("cadre", a.frame),
+                ("téton", a.nub),
+                ("cadre éclair", a.bolt_frame),
+                ("éclair", a.bolt),
+                ("biseau", a.wedge),
+                ("prise 1", a.off[0]),
+                ("prise 2", a.off[1]),
+            ];
+            for (i, bar) in a.bars.iter().enumerate() {
+                named.push((["b1", "b2", "b3", "b4", "b6", "bfull"][i], bar));
+            }
+            for (label, mask) in named {
+                assert!(
+                    mask.iter().any(|&v| v > 20),
+                    "pièce « {label} » vide à {size} px"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_thresholds_cover_the_whole_range_in_order() {
+        let mut previous = 0;
+        for p in 0..=100u8 {
+            let i = bar_index(p);
+            assert!(i < BAR_COLOURS.len(), "palier hors bornes à {p} %");
+            assert!(i >= previous, "les paliers reculent à {p} %");
+            previous = i;
+        }
+        assert_eq!(bar_index(0), 0, "0 % doit être au palier le plus bas");
+        assert_eq!(bar_index(100), 5, "100 % doit être au palier le plus haut");
+        // Le rouge doit céder avant la première notification, à 20 %.
+        assert!(bar_index(19) > 0, "encore rouge à 19 %, après le seuil d'alerte");
+        assert_eq!(bar_index(15), 0, "15 % doit encore être rouge");
+    }
+
+    #[test]
+    fn the_bar_colours_run_from_red_to_green() {
+        let first = BAR_COLOURS[0];
+        let last = BAR_COLOURS[BAR_COLOURS.len() - 1];
+        assert!(first.0 > first.1, "le palier bas doit tirer sur le rouge");
+        assert!(last.1 > last.0, "le palier haut doit tirer sur le vert");
+        // Aucune répétition : chaque palier doit se distinguer du précédent.
+        for w in BAR_COLOURS.windows(2) {
+            assert_ne!(w[0], w[1], "deux paliers de même couleur");
+        }
+    }
+
+    #[test]
+    fn the_four_states_are_visually_distinct() {
+        let states = [
+            battery(50, false),
+            battery(50, true),
+            IconState::Docked,
+            IconState::Disconnected,
+        ];
+        for (i, a) in states.iter().enumerate() {
+            for b in states.iter().skip(i + 1) {
+                assert_ne!(
+                    buffer(16, *a, false),
+                    buffer(16, *b, false),
+                    "deux états se dessinent pareil : {a:?} et {b:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn charging_shows_the_bolt_and_docked_shows_no_level() {
+        // Sur le socle, le niveau est inconnu : rien ne doit le suggérer.
+        let docked = buffer(16, IconState::Docked, false);
+        let charging = buffer(16, battery(50, true), false);
+        assert!(opaque(&charging) > opaque(&docked), "le biseau doit ajouter de la matière");
+    }
+
+    #[test]
+    fn each_level_paints_its_own_bar() {
+        let mut seen: Vec<Vec<u32>> = Vec::new();
+        for p in [5u8, 25, 40, 60, 80, 95] {
+            let px = buffer(16, battery(p, false), false);
+            assert!(!seen.contains(&px), "deux niveaux dessinent la même icône ({p} %)");
+            seen.push(px);
+        }
+    }
+
+    #[test]
+    fn sizes_snap_to_a_baked_one() {
+        for requested in 12..=70u32 {
+            let s = snap_size(requested);
+            assert!(BAKED_SIZES.contains(&s), "{requested} ramené à {s}, non dessiné");
+        }
+        assert_eq!(snap_size(16), 16);
+        assert_eq!(snap_size(24), 24);
+        assert_eq!(snap_size(30), 32);
+    }
+
+    #[test]
+    fn the_theme_changes_the_structure_but_never_the_level() {
+        // Le cadre doit s'adapter au fond ; la couleur du niveau est une
+        // information, pas une décoration, et ne doit pas bouger.
+        assert_ne!(structure_colour(true), structure_colour(false));
+        assert_ne!(bolt_colour(true), bolt_colour(false));
+
+        let mut dark = vec![0u32; 16 * 16];
+        let mut light = vec![0u32; 16 * 16];
+        draw(&mut dark, 16, battery(50, false), false, true);
+        draw(&mut light, 16, battery(50, false), false, false);
+        assert_ne!(dark, light, "le cadre doit suivre le thème");
+
+        let bar = BAR_COLOURS[bar_index(50)];
+        let has_bar = |px: &[u32]| {
+            px.iter().any(|p| {
+                let (r, g, b) = ((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF);
+                (r as u8, g as u8, b as u8) == bar
+            })
+        };
+        assert!(has_bar(&dark) && has_bar(&light), "la teinte du niveau doit rester identique");
+    }
+
+    #[test]
+    fn the_number_replaces_the_icon_and_stays_readable() {
+        for percent in [42u8, 99] {
+            let px = buffer(16, battery(percent, false), true);
+            let painted = opaque(&px);
+            assert!(painted > 40, "chiffre trop maigre pour {percent} % : {painted} pixels");
+            let rows: Vec<usize> = (0..16)
+                .filter(|&y| (0..16).any(|x| (px[y * 16 + x] >> 24) & 0xFF > 40))
+                .collect();
+            let height = rows.last().unwrap() - rows.first().unwrap() + 1;
+            assert!(height >= 9, "chiffre haut de {height} px seulement");
+        }
+    }
+
+    #[test]
+    fn no_number_is_invented_without_a_measurement() {
+        for state in [IconState::Docked, IconState::Disconnected] {
+            assert_eq!(
+                buffer(16, state, false),
+                buffer(16, state, true),
+                "un chiffre a été inscrit sur un état sans mesure : {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_pixel_is_either_transparent_or_coloured() {
+        for state in [battery(70, true), IconState::Docked, IconState::Disconnected] {
+            for p in buffer(24, state, false) {
+                let (a, rgb) = (p >> 24, p & 0x00FF_FFFF);
+                assert!(a == 0 || rgb != 0, "pixel opaque sans couleur");
+            }
+        }
     }
 }
