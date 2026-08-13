@@ -16,6 +16,12 @@ use windows_sys::Win32::System::Registry::{
 const KEY_PATH: &str = r"Software\SteamControllerBattery";
 const VALUE_SHOW_PERCENT: &str = "ShowPercent";
 
+/// Nom réservé aux vérifications, pour les mêmes raisons que dans
+/// [`crate::autostart`] : une série de tests ne doit rien changer aux
+/// préférences de qui l'exécute.
+#[cfg(test)]
+const TEST_VALUE: &str = "TestFlag";
+
 fn wide(s: &str) -> Vec<u16> {
     std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
 }
@@ -99,19 +105,22 @@ pub fn set_show_percent(on: bool) -> bool {
 mod tests {
     use super::*;
 
-    /// Touche le vrai registre de l'utilisateur ; restaure l'état de départ
-    /// quoi qu'il advienne.
+    /// Touche le vrai registre, mais sous un nom réservé : la préférence de
+    /// l'utilisateur n'est ni lue ni écrite.
     #[test]
     fn the_preference_round_trips() {
-        let original = show_percent();
+        let untouched = show_percent();
 
-        assert!(set_show_percent(true));
-        assert!(show_percent(), "activation non retenue");
-        assert!(set_show_percent(false));
-        assert!(!show_percent(), "désactivation non retenue");
+        assert!(write_flag(TEST_VALUE, true));
+        assert!(read_flag(TEST_VALUE, false), "activation non retenue");
+        assert!(write_flag(TEST_VALUE, false));
+        assert!(!read_flag(TEST_VALUE, true), "désactivation non retenue");
 
-        set_show_percent(original);
-        assert_eq!(show_percent(), original, "état de départ non restauré");
+        assert_eq!(
+            show_percent(),
+            untouched,
+            "la vérification a touché à la préférence de l'utilisateur"
+        );
     }
 
     #[test]
