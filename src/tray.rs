@@ -8,13 +8,27 @@ use windows_sys::Win32::UI::Shell::{
     NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos, SetForegroundWindow,
+    AppendMenuW, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos, RegisterWindowMessageW,
+    SetForegroundWindow,
     TrackPopupMenu, HICON, MF_CHECKED, MF_ENABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
     MF_UNCHECKED, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
 };
 
 /// Message que Windows renvoie à notre fenêtre pour les clics sur l'icône.
 pub const WM_TRAY: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 1;
+
+/// Identifiant du message que l'explorateur diffuse quand il (re)crée la zone
+/// de notification.
+///
+/// Il faut l'écouter, sans quoi l'icône disparaît pour de bon au premier
+/// redémarrage de l'explorateur — et ne paraît jamais lorsque l'application
+/// est lancée à l'ouverture de session, avant que la zone n'existe. Le
+/// processus continue de tourner sans que rien ne le montre, ce qui est le
+/// pire des deux mondes.
+pub fn taskbar_created() -> u32 {
+    static ID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *ID.get_or_init(|| unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) })
+}
 
 pub const ID_TOGGLE_AUTOSTART: u32 = 1;
 pub const ID_QUIT: u32 = 2;
@@ -91,6 +105,13 @@ impl Tray {
         if !previous.is_null() {
             unsafe { DestroyIcon(previous) };
         }
+    }
+
+    /// Oublie que l'icône a été posée, pour que la prochaine mise à jour la
+    /// recrée au lieu de tenter de modifier une entrée que l'explorateur a
+    /// détruite.
+    pub fn forget(&mut self) {
+        self.added = false;
     }
 
     /// Met à jour la seule infobulle. Le niveau exact et la tension changent à

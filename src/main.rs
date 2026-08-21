@@ -334,6 +334,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
 
+        // L'explorateur vient de (re)créer la zone de notification : toutes
+        // les icônes ont été détruites avec l'ancienne, il faut reposer la
+        // nôtre. C'est aussi ce qui la fait apparaître quand l'application
+        // démarre avec la session, avant que la zone n'existe.
+        // Le test d'égalité écarte zéro : c'est ce que rend l'enregistrement
+        // du message s'il échoue, et zéro est déjà `WM_NULL`, que Windows
+        // envoie pour de tout autres raisons.
+        _ if msg != 0 && msg == tray::taskbar_created() => {
+            CTX.with(|c| {
+                if let Ok(mut borrow) = c.try_borrow_mut() {
+                    if let Some(ctx) = borrow.as_mut() {
+                        ctx.tray.forget();
+                        repaint(hwnd, ctx);
+                    }
+                }
+            });
+            0
+        }
+
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
 }
